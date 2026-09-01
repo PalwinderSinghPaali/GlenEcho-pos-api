@@ -1,0 +1,35 @@
+# Dependency directories
+node_modules/
+
+# Next.js build output
+.next
+out
+
+
+*.log
+logs/
+
+# Nuxt.js build / generate output
+.nuxt
+dist
+
+# Stores VSCode versions used for testing VSCode extensions
+.vscode-test
+.vscode/
+
+/uploads/*
+/temp/*
+
+# dotenv environment variables file
+.env
+.env*.local
+.env*.development
+.env*.production
+
+service-account.json
+service-account-prod.json
+
+POS Website Development Agreement.docx
+lightspeed images
+Lightspeed_Integration_Architecture.md
+Lightspeed_Integration_Architecture_v2.md
