@@ -2323,6 +2323,107 @@ export class LightspeedService {
   }
 
   /**
+   * createManufacturer - creates a manufacturer (brand) in Lightspeed POS
+   */
+  public static async createManufacturer(payload: any): Promise<any> {
+    logger.info('Creating manufacturer in Lightspeed POS with payload:', payload);
+    return this.makeRequest('Manufacturer.json', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /**
+   * createBrand - alias for createManufacturer
+   */
+  public static async createBrand(payload: any): Promise<any> {
+    return this.createManufacturer(payload);
+  }
+
+  /**
+   * updateManufacturer - updates a manufacturer (brand) in Lightspeed POS
+   */
+  public static async updateManufacturer(lightspeedManufacturerId: string, payload: any): Promise<any> {
+    const path = `Manufacturer/${lightspeedManufacturerId}.json`;
+    logger.info(`Updating manufacturer ${lightspeedManufacturerId} in Lightspeed POS with payload:`, payload);
+    return this.makeRequest(path, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /**
+   * updateBrand - alias for updateManufacturer
+   */
+  public static async updateBrand(lightspeedBrandId: string, payload: any): Promise<any> {
+    return this.updateManufacturer(lightspeedBrandId, payload);
+  }
+
+  /**
+   * createCategory - creates a category in Lightspeed POS
+   */
+  public static async createCategory(payload: any): Promise<any> {
+    logger.info('Creating category in Lightspeed POS with payload:', payload);
+    return this.makeRequest('Category.json', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /**
+   * updateCategory - updates a category in Lightspeed POS
+   */
+  public static async updateCategory(lightspeedCategoryId: string, payload: any): Promise<any> {
+    const path = `Category/${lightspeedCategoryId}.json`;
+    logger.info(`Updating category ${lightspeedCategoryId} in Lightspeed POS with payload:`, payload);
+    return this.makeRequest(path, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /**
+   * deleteCategory - deletes a category in Lightspeed POS via DELETE
+   */
+  public static async deleteCategory(lightspeedCategoryId: string): Promise<any> {
+    const path = `Category/${lightspeedCategoryId}.json`;
+    logger.info(`Deleting category ${lightspeedCategoryId} in Lightspeed POS via DELETE...`);
+    return this.makeRequest(path, { method: 'DELETE' });
+  }
+
+  /**
+   * createTag - creates a tag in Lightspeed POS
+   */
+  public static async createTag(payload: any): Promise<any> {
+    logger.info('Creating tag in Lightspeed POS with payload:', payload);
+    return this.makeRequest('Tag.json', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /**
+   * updateTag - updates a tag in Lightspeed POS
+   */
+  public static async updateTag(lightspeedTagId: string, payload: any): Promise<any> {
+    const path = `Tag/${lightspeedTagId}.json`;
+    logger.info(`Updating tag ${lightspeedTagId} in Lightspeed POS with payload:`, payload);
+    return this.makeRequest(path, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /**
+   * deleteTag - deletes a tag in Lightspeed POS via DELETE
+   */
+  public static async deleteTag(lightspeedTagId: string): Promise<any> {
+    const path = `Tag/${lightspeedTagId}.json`;
+    logger.info(`Deleting tag ${lightspeedTagId} in Lightspeed POS via DELETE...`);
+    return this.makeRequest(path, { method: 'DELETE' });
+  }
+
+  /**
    * pushSale - sends a Sale transaction payload to Lightspeed
    */
   public static async pushSale(salePayload: any): Promise<any> {
