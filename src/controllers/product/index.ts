@@ -322,6 +322,10 @@ export const createProduct = async (req: Request, res: Response) => {
       attribute_3_value,
       note,
       display_note,
+      tax_class_id,
+      tax_class_name,
+      tag_ids,
+      tags,
     } = req.body;
 
     if (!description || typeof description !== 'string' || description.trim() === '') {
@@ -347,13 +351,41 @@ export const createProduct = async (req: Request, res: Response) => {
       if (m) matrixLsId = m.lightspeed_matrix_id;
     }
 
+    // Resolve Tags (by IDs or by string names)
+    let resolvedTagNames: string[] = [];
+    let resolvedTagIds: number[] = [];
+
+    if (Array.isArray(tag_ids) && tag_ids.length > 0) {
+      const dbTags = await Tag.findAll({ where: { id: tag_ids } });
+      resolvedTagIds = dbTags.map((t) => t.id);
+      resolvedTagNames = dbTags.map((t) => t.name.trim());
+    } else if (Array.isArray(tags) && tags.length > 0) {
+      for (const tName of tags) {
+        if (typeof tName === 'string' && tName.trim() !== '') {
+          const trimmed = tName.trim();
+          const [tRecord] = await Tag.findOrCreate({
+            where: { name: trimmed },
+            defaults: {
+              lightspeed_tag_id: `local_tag_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+              name: trimmed,
+              archived: false,
+            },
+          });
+          resolvedTagIds.push(tRecord.id);
+          resolvedTagNames.push(trimmed);
+        }
+      }
+    }
+
+    const resolvedTaxClassId = tax_class_id ? String(tax_class_id) : '0';
+
     const pricesPayload = [
       { useType: 'Default', amount: price || 0 },
       { useType: 'MSRP', amount: msrp || 0 },
       { useType: 'Online', amount: online_price || 0 },
     ];
 
-    const lsPayload = {
+    const lsPayload: any = {
       description: description.trim(),
       systemSku: system_sku || null,
       customSku: custom_sku || null,
@@ -376,18 +408,55 @@ export const createProduct = async (req: Request, res: Response) => {
       itemMatrixID: matrixLsId,
     };
 
-    // Log what would be sent in write-active mode
-    logger.info(`[READ-ONLY] Lightspeed Item CREATE payload (not sent): POST /Item.json ${JSON.stringify(lsPayload)}`);
+    if (tax_class_id) {
+      lsPayload.taxClassID = resolvedTaxClassId;
+    }
 
-    const localLsId = `local_item_${Date.now()}`;
+    if (resolvedTagNames.length > 0) {
+      lsPayload.Tags = { tag: resolvedTagNames };
+    }
+
+    const isReadOnly = await LightspeedService.isReadOnlyMode();
+
+    // ─── READ-ONLY BRANCH ──────────────────────────────────────────────────
+    // If READ Only flag is true, only show the payload in console and do not write to POS or DB.
+    if (isReadOnly) {
+      console.log('[READ-ONLY] Lightspeed Item CREATE payload:\n', JSON.stringify(lsPayload, null, 2));
+      logger.info(
+        `[READ-ONLY] Lightspeed Item CREATE payload (not sent): POST /Item.json ${JSON.stringify(lsPayload)}`
+      );
+
+      return res.sendSuccess(
+        res,
+        {
+          message: 'Read-only mode is active. Payload displayed in console (no writes performed to POS or Database).',
+          payload: lsPayload,
+        },
+        200
+      );
+    }
+
+    // ─── WRITE ACCESS BRANCH ───────────────────────────────────────────────
+    // When read-only mode is disabled, proceed with write access to Lightspeed POS and local Database.
+    logger.info('Sending Item CREATE request to Lightspeed POS...');
+    const response = await LightspeedService.createProduct(lsPayload);
+    const responseList = LightspeedService.extractList<any>(response, 'Item');
+    const lsItem = responseList[0] || response.Item;
+    if (!lsItem || !lsItem.itemID) {
+      throw new Error('Invalid response received from Lightspeed Item API.');
+    }
+
+    const lightspeedItemId = lsItem.itemID.toString();
+    const resolvedSystemSku = lsItem.systemSku ? lsItem.systemSku.toString() : (system_sku || null);
+
     const transaction = await sequelize.transaction();
 
     try {
       const product = await Product.create(
         {
-          lightspeed_item_id: localLsId,
+          lightspeed_item_id: lightspeedItemId,
           description: description.trim(),
-          system_sku: system_sku || null,
+          system_sku: resolvedSystemSku,
           custom_sku: custom_sku || null,
           upc: upc || null,
           ean: ean || null,
@@ -410,9 +479,21 @@ export const createProduct = async (req: Request, res: Response) => {
           note: note || null,
           display_note: !!display_note,
           archived: false,
+          tax_class_id: tax_class_id ? String(tax_class_id) : null,
+          tax_class_name: tax_class_name || null,
+          qoh: 0,
         },
         { transaction }
       );
+
+      // Create ProductTag mappings
+      if (resolvedTagIds.length > 0) {
+        const bulkTags = resolvedTagIds.map((tId) => ({
+          product_id: product.id,
+          tag_id: tId,
+        }));
+        await ProductTag.bulkCreate(bulkTags, { transaction });
+      }
 
       // Create mapping in Entity Map with initial hash
       const hashPayload = {
@@ -429,7 +510,7 @@ export const createProduct = async (req: Request, res: Response) => {
         msrp: product.msrp,
         online_price: product.online_price,
         default_cost: product.default_cost,
-        qoh: 0,
+        qoh: product.qoh,
         discountable: product.discountable,
         taxable: product.taxable,
         item_type: product.item_type,
@@ -441,17 +522,19 @@ export const createProduct = async (req: Request, res: Response) => {
         note: product.note,
         display_note: product.display_note,
         archived: product.archived,
+        tax_class_id: product.tax_class_id,
+        tax_class_name: product.tax_class_name,
         shops: [],
         vendors: [],
-        tags: [],
+        tags: [...resolvedTagNames].sort(),
         images: [],
       };
       const hash = LightspeedService.calculateHash(hashPayload);
 
-      await LightspeedEntityMap.create(
+      await LightspeedEntityMap.upsert(
         {
           entity_type: 'product',
-          lightspeed_id: localLsId,
+          lightspeed_id: lightspeedItemId,
           local_id: product.id,
           hash,
           last_sync: new Date(),
@@ -464,7 +547,7 @@ export const createProduct = async (req: Request, res: Response) => {
       const formatted = await formatProduct(product);
       return res.sendSuccess(
         res,
-        { product: formatted, message: 'Product created successfully (local only — READ-ONLY mode active).' },
+        { product: formatted, message: 'Product created successfully in Lightspeed and local database.' },
         201
       );
     } catch (err) {
@@ -525,13 +608,50 @@ export const updateProduct = async (req: Request, res: Response) => {
       if (m) matrixLsId = m.lightspeed_matrix_id;
     }
 
+    const finalTaxClassId =
+      updates.tax_class_id !== undefined
+        ? updates.tax_class_id
+          ? String(updates.tax_class_id)
+          : null
+        : product.tax_class_id;
+    const finalTaxClassName =
+      updates.tax_class_name !== undefined ? updates.tax_class_name : product.tax_class_name;
+
+    // Resolve Tags if provided
+    let resolvedTagNames: string[] | undefined = undefined;
+    let resolvedTagIds: number[] | undefined = undefined;
+
+    if (updates.tag_ids !== undefined && Array.isArray(updates.tag_ids)) {
+      const dbTags = await Tag.findAll({ where: { id: updates.tag_ids } });
+      resolvedTagIds = dbTags.map((t) => t.id);
+      resolvedTagNames = dbTags.map((t) => t.name.trim());
+    } else if (updates.tags !== undefined && Array.isArray(updates.tags)) {
+      resolvedTagIds = [];
+      resolvedTagNames = [];
+      for (const tName of updates.tags) {
+        if (typeof tName === 'string' && tName.trim() !== '') {
+          const trimmed = tName.trim();
+          const [tRecord] = await Tag.findOrCreate({
+            where: { name: trimmed },
+            defaults: {
+              lightspeed_tag_id: `local_tag_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+              name: trimmed,
+              archived: false,
+            },
+          });
+          resolvedTagIds.push(tRecord.id);
+          resolvedTagNames.push(trimmed);
+        }
+      }
+    }
+
     const pricesPayload = [
       { useType: 'Default', amount: updates.price !== undefined ? updates.price : product.price },
       { useType: 'MSRP', amount: updates.msrp !== undefined ? updates.msrp : product.msrp },
       { useType: 'Online', amount: updates.online_price !== undefined ? updates.online_price : product.online_price },
     ];
 
-    const lsPayload = {
+    const lsPayload: any = {
       description: finalDescription,
       systemSku: updates.system_sku !== undefined ? updates.system_sku : product.system_sku,
       customSku: updates.custom_sku !== undefined ? updates.custom_sku : product.custom_sku,
@@ -560,17 +680,62 @@ export const updateProduct = async (req: Request, res: Response) => {
       itemMatrixID: matrixLsId,
     };
 
-    // Log the write action
-    logger.info(
-      `[READ-ONLY] Lightspeed Item UPDATE payload (not sent): PUT /Item/${product.lightspeed_item_id}.json ${JSON.stringify(lsPayload)}`
-    );
+    if (finalTaxClassId) {
+      lsPayload.taxClassID = finalTaxClassId;
+    }
+
+    if (resolvedTagNames !== undefined) {
+      lsPayload.Tags = resolvedTagNames.length > 0 ? { tag: resolvedTagNames } : '';
+    }
+
+    const isReadOnly = await LightspeedService.isReadOnlyMode();
+
+    // ─── READ-ONLY BRANCH ──────────────────────────────────────────────────
+    // If READ Only flag is true, only show the payload in console and do not write to POS or DB.
+    if (isReadOnly) {
+      console.log(
+        `[READ-ONLY] Lightspeed Item UPDATE payload for product ID ${product.lightspeed_item_id}:\n`,
+        JSON.stringify(lsPayload, null, 2)
+      );
+      logger.info(
+        `[READ-ONLY] Lightspeed Item UPDATE payload (not sent): PUT /Item/${product.lightspeed_item_id}.json ${JSON.stringify(lsPayload)}`
+      );
+
+      return res.sendSuccess(res, {
+        message: 'Read-only mode is active. Payload displayed in console (no writes performed to POS or Database).',
+        payload: lsPayload,
+      });
+    }
+
+    // ─── WRITE ACCESS BRANCH ───────────────────────────────────────────────
+    // When read-only mode is disabled, proceed with write access to Lightspeed POS and local Database.
+    let lightspeedItemId = product.lightspeed_item_id;
+    let updatedSystemSku = product.system_sku;
+
+    if (!lightspeedItemId || lightspeedItemId.startsWith('local_')) {
+      logger.info('Product has local ID only. Creating in Lightspeed POS with payload:', lsPayload);
+      const response = await LightspeedService.createProduct(lsPayload);
+      const responseList = LightspeedService.extractList<any>(response, 'Item');
+      const lsItem = responseList[0] || response.Item;
+      if (!lsItem || !lsItem.itemID) {
+        throw new Error('Invalid response received from Lightspeed Item API.');
+      }
+      lightspeedItemId = lsItem.itemID.toString();
+      if (lsItem.systemSku) {
+        updatedSystemSku = lsItem.systemSku.toString();
+      }
+    } else {
+      logger.info(`Updating product ${lightspeedItemId} in Lightspeed POS with payload:`, lsPayload);
+      await LightspeedService.updateProduct(lightspeedItemId, lsPayload);
+    }
 
     const transaction = await sequelize.transaction();
     try {
       await product.update(
         {
+          lightspeed_item_id: lightspeedItemId,
+          system_sku: updates.system_sku !== undefined ? updates.system_sku : updatedSystemSku,
           description: finalDescription,
-          system_sku: updates.system_sku !== undefined ? updates.system_sku : product.system_sku,
           custom_sku: updates.custom_sku !== undefined ? updates.custom_sku : product.custom_sku,
           upc: updates.upc !== undefined ? updates.upc : product.upc,
           ean: updates.ean !== undefined ? updates.ean : product.ean,
@@ -597,9 +762,23 @@ export const updateProduct = async (req: Request, res: Response) => {
           note: updates.note !== undefined ? updates.note : product.note,
           display_note: updates.display_note !== undefined ? !!updates.display_note : product.display_note,
           archived: updates.archived !== undefined ? !!updates.archived : product.archived,
+          tax_class_id: finalTaxClassId,
+          tax_class_name: finalTaxClassName,
         },
         { transaction }
       );
+
+      // Update ProductTag mappings if tags were updated
+      if (resolvedTagIds !== undefined) {
+        await ProductTag.destroy({ where: { product_id: product.id }, transaction });
+        if (resolvedTagIds.length > 0) {
+          const bulkTags = resolvedTagIds.map((tId) => ({
+            product_id: product.id,
+            tag_id: tId,
+          }));
+          await ProductTag.bulkCreate(bulkTags, { transaction });
+        }
+      }
 
       // Re-hash product for Sync tracking
       const hashPayload = {
@@ -628,9 +807,11 @@ export const updateProduct = async (req: Request, res: Response) => {
         note: product.note,
         display_note: product.display_note,
         archived: product.archived,
+        tax_class_id: product.tax_class_id,
+        tax_class_name: product.tax_class_name,
         shops: [],
         vendors: [],
-        tags: [],
+        tags: resolvedTagNames !== undefined ? [...resolvedTagNames].sort() : [],
         images: [],
       };
       const hash = LightspeedService.calculateHash(hashPayload);
@@ -651,7 +832,7 @@ export const updateProduct = async (req: Request, res: Response) => {
       const formatted = await formatProduct(product);
       return res.sendSuccess(res, {
         product: formatted,
-        message: 'Product updated successfully (local only — READ-ONLY mode active).',
+        message: 'Product updated successfully in Lightspeed and local database.',
       });
     } catch (err) {
       await transaction.rollback();
@@ -678,9 +859,30 @@ export const deleteProduct = async (req: Request, res: Response) => {
       return res.sendError(res, 'Product not found.');
     }
 
-    logger.info(
-      `[READ-ONLY] Lightspeed Item DELETE payload (not sent): DELETE /Item/${product.lightspeed_item_id}.json`
-    );
+    const isReadOnly = await LightspeedService.isReadOnlyMode();
+
+    // ─── READ-ONLY BRANCH ──────────────────────────────────────────────────
+    // If READ Only flag is true, only show the delete payload in console and do not write to POS or DB.
+    if (isReadOnly) {
+      console.log(
+        `[READ-ONLY] Lightspeed Item DELETE payload for product ID ${product.lightspeed_item_id}: DELETE /Item/${product.lightspeed_item_id}.json`
+      );
+      logger.info(
+        `[READ-ONLY] Lightspeed Item DELETE payload (not sent): DELETE /Item/${product.lightspeed_item_id}.json`
+      );
+
+      return res.sendSuccess(res, {
+        message: 'Read-only mode is active. Delete payload displayed in console (no writes performed to POS or Database).',
+        itemID: product.lightspeed_item_id,
+      });
+    }
+
+    // ─── WRITE ACCESS BRANCH ───────────────────────────────────────────────
+    // When read-only mode is disabled, proceed with delete/archive in Lightspeed POS and local Database.
+    if (product.lightspeed_item_id && !product.lightspeed_item_id.startsWith('local_')) {
+      logger.info(`Archiving product ${product.lightspeed_item_id} in Lightspeed POS via DELETE...`);
+      await LightspeedService.archiveProduct(product.lightspeed_item_id);
+    }
 
     const transaction = await sequelize.transaction();
     try {
@@ -698,7 +900,7 @@ export const deleteProduct = async (req: Request, res: Response) => {
       await transaction.commit();
 
       return res.sendSuccess(res, {
-        message: `Product '${product.description}' deleted successfully (local only — READ-ONLY mode active).`,
+        message: `Product '${product.description}' deleted successfully from Lightspeed and local database.`,
       });
     } catch (err) {
       await transaction.rollback();
@@ -730,62 +932,110 @@ export const uploadProductImages = async (req: Request, res: Response) => {
       return res.sendError(res, 'No image files uploaded.');
     }
 
+    const isReadOnly = await LightspeedService.isReadOnlyMode();
+
+    // ─── READ-ONLY BRANCH ──────────────────────────────────────────────────
+    // If READ Only flag is true, only show the payload in console and do not write to POS or DB.
+    if (isReadOnly) {
+      const existingImagesCount = await ProductImage.count({ where: { product_id: product.id } });
+      const filesInfo = files.map((file, i) => {
+        const lsImagePayload = {
+          description: file.originalname,
+          ordering: existingImagesCount + i,
+          itemID: parseInt(product.lightspeed_item_id, 10) || 0,
+        };
+        console.log(
+          `[READ-ONLY] Lightspeed Image UPLOAD payload for product ID ${product.lightspeed_item_id} with file '${file.originalname}':\n`,
+          JSON.stringify(lsImagePayload, null, 2)
+        );
+        logger.info(
+          `[READ-ONLY] Lightspeed Image UPLOAD payload (not sent): POST /Item/${product.lightspeed_item_id}/Image.json with file '${file.originalname}' payload: ${JSON.stringify(lsImagePayload)}`
+        );
+        return {
+          filename: file.originalname,
+          size: file.size,
+          mimetype: file.mimetype,
+          ordering: existingImagesCount + i,
+        };
+      });
+
+      return res.sendSuccess(res, {
+        message: 'Read-only mode is active. Image upload payload displayed in console (no writes performed to POS or Database).',
+        payload: {
+          productID: product.lightspeed_item_id,
+          files: filesInfo,
+        },
+      });
+    }
+
+    // ─── WRITE ACCESS BRANCH ───────────────────────────────────────────────
+    // When read-only mode is disabled, proceed with image upload to Lightspeed POS and local Database.
     const dir = path.join(__dirname, '../../../uploads');
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
 
     const imagesCreated: ProductImage[] = [];
+    const existingImagesCount = await ProductImage.count({ where: { product_id: product.id } });
 
-    const transaction = await sequelize.transaction();
-    try {
-      const existingImagesCount = await ProductImage.count({ where: { product_id: product.id }, transaction });
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const uniqueFilename = `${Date.now()}_${i}_${path.basename(file.originalname)}`;
+      const filePath = path.join(dir, uniqueFilename);
 
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        const uniqueFilename = `${Date.now()}_${i}_${path.basename(file.originalname)}`;
-        const filePath = path.join(dir, uniqueFilename);
+      fs.writeFileSync(filePath, file.buffer);
 
-        fs.writeFileSync(filePath, file.buffer);
+      const localUrl = `${config.app.prefix}/${config.app.version}/lightspeed/images/${uniqueFilename}`;
+      const isFeatured = existingImagesCount === 0 && i === 0;
 
-        const localUrl = `${config.app.prefix}/${config.app.version}/lightspeed/images/${uniqueFilename}`;
-        const isFeatured = existingImagesCount === 0 && i === 0;
+      let lightspeedImageId = `local_img_${Date.now()}_${i}`;
+      let lightspeedUrl: string | null = null;
 
-        // Log R-Series Image POST payload
-        const lsImagePayload = {
-          description: file.originalname,
-          ordering: existingImagesCount + i,
-          itemID: parseInt(product.lightspeed_item_id, 10) || 0,
-        };
-        logger.info(
-          `[READ-ONLY] Lightspeed Image UPLOAD payload (not sent): POST /Image.json with file '${file.originalname}' payload: ${JSON.stringify(lsImagePayload)}`
-        );
-
-        const img = await ProductImage.create(
-          {
-            product_id: product.id,
-            lightspeed_image_id: `local_img_${Date.now()}_${i}`,
-            lightspeed_url: null,
-            local_path: localUrl,
-            filename: file.originalname,
-            is_featured: isFeatured,
-            download_status: 'done',
-          },
-          { transaction }
-        );
-
-        imagesCreated.push(img);
+      if (product.lightspeed_item_id && !product.lightspeed_item_id.startsWith('local_')) {
+        try {
+          logger.info(
+            `Uploading image '${file.originalname}' to Lightspeed POS for product ${product.lightspeed_item_id}...`
+          );
+          const lsImgRes = await LightspeedService.uploadItemImage(
+            product.lightspeed_item_id,
+            file.buffer,
+            file.originalname,
+            file.mimetype,
+            {
+              description: file.originalname,
+              ordering: existingImagesCount + i,
+            }
+          );
+          const responseList = LightspeedService.extractList<any>(lsImgRes, 'Image');
+          const lsImage = responseList[0] || lsImgRes.Image;
+          if (lsImage && lsImage.imageID) {
+            lightspeedImageId = lsImage.imageID.toString();
+            if (lsImage.baseImageURL && lsImage.publicID) {
+              lightspeedUrl = `${lsImage.baseImageURL}${lsImage.publicID}.jpg`;
+            }
+          }
+        } catch (uploadErr) {
+          logger.error(`Error uploading image to Lightspeed for product ${product.id}:`, uploadErr);
+        }
       }
 
-      await transaction.commit();
-      return res.sendSuccess(res, {
-        images: imagesCreated,
-        message: 'Product images uploaded successfully (local only — READ-ONLY mode active).',
+      const img = await ProductImage.create({
+        product_id: product.id,
+        lightspeed_image_id: lightspeedImageId,
+        lightspeed_url: lightspeedUrl,
+        local_path: localUrl,
+        filename: file.originalname,
+        is_featured: isFeatured,
+        download_status: 'done',
       });
-    } catch (err) {
-      await transaction.rollback();
-      throw err;
+
+      imagesCreated.push(img);
     }
+
+    return res.sendSuccess(res, {
+      images: imagesCreated,
+      message: 'Product images uploaded successfully to Lightspeed and local database.',
+    });
   } catch (error: any) {
     logger.error(error);
     return res.sendError(res, error.message || 'ERR_INTERNAL_SERVER_ERROR');

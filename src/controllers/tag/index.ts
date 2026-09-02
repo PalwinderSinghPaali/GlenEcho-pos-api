@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { Op, FindOptions } from 'sequelize';
 import { Tag, LightspeedEntityMap, ProductTag } from '@/database/models';
+import { LightspeedService } from '@/services/lightspeed';
 import logger from '@/utils/logger';
 
 // ---------------------------------------------------------------------------
@@ -12,18 +13,18 @@ import logger from '@/utils/logger';
  * Lightspeed (both camelCase and original database keys) so that the admin
  * panel receives a payload perfectly synced with the Lightspeed Tag schema.
  */
-function formatTag(tagObj: Tag) {
+function formatTag(tagObj: any) {
   if (!tagObj) return null;
-  const json = tagObj.toJSON();
+  const json = tagObj.toJSON ? tagObj.toJSON() : tagObj;
 
   return {
     ...json,
     // Exact Lightspeed API fields
-    tagID: parseInt(tagObj.lightspeed_tag_id, 10) || 0,
-    name: tagObj.name,
-    archived: !!tagObj.archived,
-    createTime: tagObj.createdAt || null,
-    timeStamp: tagObj.updatedAt || null,
+    tagID: parseInt(json.lightspeed_tag_id, 10) || 0,
+    name: json.name,
+    archived: !!json.archived,
+    createTime: json.createdAt || null,
+    timeStamp: json.updatedAt || null,
   };
 }
 
@@ -143,30 +144,68 @@ export const createTag = async (req: Request, res: Response) => {
       return res.sendError(res, `Tag with name '${trimmedName}' already exists.`);
     }
 
-    // Generate local-only Lightspeed ID
-    const localLsId = `local_${Date.now()}`;
-
     const lsPayload = {
       name: trimmedName,
-      archived: archived === true || archived === 'true' ? 'true' : 'false',
     };
 
-    // Log the Lightspeed payload that would be sent (READ-ONLY mode)
-    logger.info(
-      '[READ-ONLY] Lightspeed Tag CREATE payload (not sent): POST /Tag.json ' +
-        JSON.stringify(lsPayload)
-    );
+    const isReadOnly = await LightspeedService.isReadOnlyMode();
 
-    // Create locally
+    // ─── READ-ONLY BRANCH ──────────────────────────────────────────────────
+    // If READ Only flag is true, only show the payload in console and do not write to POS or DB.
+    if (isReadOnly) {
+      console.log('[READ-ONLY] Lightspeed Tag CREATE payload:\n', JSON.stringify(lsPayload, null, 2));
+      logger.info(
+        '[READ-ONLY] Lightspeed Tag CREATE payload (not sent): POST /Tag.json ' +
+          JSON.stringify(lsPayload)
+      );
+
+      return res.sendSuccess(
+        res,
+        {
+          message: 'Read-only mode is active. Payload displayed in console (no writes performed to POS or Database).',
+          payload: lsPayload,
+        },
+        200
+      );
+    }
+
+    // ─── WRITE ACCESS BRANCH ───────────────────────────────────────────────
+    // When read-only mode is disabled, proceed with write access to Lightspeed POS and local Database.
+    logger.info('Sending Tag CREATE request to Lightspeed POS...');
+    const response = await LightspeedService.createTag(lsPayload);
+    const responseList = LightspeedService.extractList<any>(response, 'Tag');
+    const lsTag = responseList[0] || response.Tag;
+    if (!lsTag || !lsTag.tagID) {
+      throw new Error('Invalid response received from Lightspeed Tag API.');
+    }
+
+    const lightspeedTagId = lsTag.tagID.toString();
+
+    // Create locally in database
     const tag = await Tag.create({
       name: trimmedName,
-      lightspeed_tag_id: localLsId,
+      lightspeed_tag_id: lightspeedTagId,
       archived: archived === true || archived === 'true',
+    });
+
+    // Update entity mapping for change detection
+    const payloadForHash = {
+      name: tag.name,
+      archived: tag.archived,
+    };
+    const hash = LightspeedService.calculateHash(payloadForHash);
+
+    await LightspeedEntityMap.upsert({
+      entity_type: 'tag',
+      lightspeed_id: lightspeedTagId,
+      local_id: tag.id,
+      hash,
+      last_sync: new Date(),
     });
 
     return res.sendSuccess(
       res,
-      { tag: formatTag(tag), message: 'Tag created successfully (local only — READ-ONLY mode active).' },
+      { tag: formatTag(tag), message: 'Tag created successfully in Lightspeed and local database.' },
       201
     );
   } catch (error: unknown) {
@@ -176,7 +215,7 @@ export const createTag = async (req: Request, res: Response) => {
 };
 
 // ---------------------------------------------------------------------------
-// 4. PUT /tag/:id — Update tag locally (maps to PUT /Tag/{tagID}.json)
+// 4. PUT /tag/:id — Update tag (maps to PUT /Tag/{tagID}.json)
 // ---------------------------------------------------------------------------
 
 export const updateTag = async (req: Request, res: Response) => {
@@ -209,28 +248,71 @@ export const updateTag = async (req: Request, res: Response) => {
     }
 
     const lsPayload = {
-      tagID: tag.lightspeed_tag_id,
       name: newName,
-      archived: newArchived ? 'true' : 'false',
     };
 
-    // Log the Lightspeed payload that would be sent (READ-ONLY mode)
-    logger.info(
-      '[READ-ONLY] Lightspeed Tag UPDATE payload (not sent): PUT /Tag/' +
-        tag.lightspeed_tag_id +
-        '.json ' +
-        JSON.stringify(lsPayload)
-    );
+    const isReadOnly = await LightspeedService.isReadOnlyMode();
 
-    // Persist locally
+    // ─── READ-ONLY BRANCH ──────────────────────────────────────────────────
+    // If READ Only flag is true, only show the payload in console and do not write to POS or DB.
+    if (isReadOnly) {
+      console.log(
+        `[READ-ONLY] Lightspeed Tag UPDATE payload for tag ID ${tag.lightspeed_tag_id}:\n`,
+        JSON.stringify(lsPayload, null, 2)
+      );
+      logger.info(
+        `[READ-ONLY] Lightspeed Tag UPDATE payload (not sent): PUT /Tag/${tag.lightspeed_tag_id}.json ` +
+          JSON.stringify(lsPayload)
+      );
+
+      return res.sendSuccess(res, {
+        message: 'Read-only mode is active. Payload displayed in console (no writes performed to POS or Database).',
+        payload: lsPayload,
+      });
+    }
+
+    // ─── WRITE ACCESS BRANCH ───────────────────────────────────────────────
+    // When read-only mode is disabled, proceed with write access to Lightspeed POS and local Database.
+    let lightspeedTagId = tag.lightspeed_tag_id;
+    if (!lightspeedTagId || lightspeedTagId.startsWith('local_')) {
+      logger.info('Tag has local ID only. Creating in Lightspeed POS with payload:', lsPayload);
+      const response = await LightspeedService.createTag(lsPayload);
+      const responseList = LightspeedService.extractList<any>(response, 'Tag');
+      const lsTag = responseList[0] || response.Tag;
+      if (!lsTag || !lsTag.tagID) {
+        throw new Error('Invalid response received from Lightspeed Tag API.');
+      }
+      lightspeedTagId = lsTag.tagID.toString();
+    } else {
+      logger.info(`Updating tag ${lightspeedTagId} in Lightspeed POS with payload:`, lsPayload);
+      await LightspeedService.updateTag(lightspeedTagId, lsPayload);
+    }
+
+    // Persist locally in Database
     await tag.update({
+      lightspeed_tag_id: lightspeedTagId,
       name: newName,
       archived: newArchived,
     });
 
+    // Update entity mapping for change detection
+    const payloadForHash = {
+      name: tag.name,
+      archived: tag.archived,
+    };
+    const hash = LightspeedService.calculateHash(payloadForHash);
+
+    await LightspeedEntityMap.upsert({
+      entity_type: 'tag',
+      lightspeed_id: lightspeedTagId,
+      local_id: tag.id,
+      hash,
+      last_sync: new Date(),
+    });
+
     return res.sendSuccess(res, {
       tag: formatTag(tag),
-      message: 'Tag updated successfully (local only — READ-ONLY mode active).',
+      message: 'Tag updated successfully in Lightspeed and local database.',
     });
   } catch (error: unknown) {
     logger.error(error);
@@ -239,7 +321,7 @@ export const updateTag = async (req: Request, res: Response) => {
 };
 
 // ---------------------------------------------------------------------------
-// 5. DELETE /tag/:id — Delete tag locally (maps to DELETE /Tag/{tagID}.json)
+// 5. DELETE /tag/:id — Delete tag (maps to DELETE /Tag/{tagID}.json)
 // ---------------------------------------------------------------------------
 
 export const deleteTag = async (req: Request, res: Response) => {
@@ -265,22 +347,50 @@ export const deleteTag = async (req: Request, res: Response) => {
             `Use ?force=true to disassociate products and proceed.`
         );
       }
-      // Force mode — detach products from tag (optional since DB onDelete CASCADE handles it,
-      // but doing it explicitly guarantees clean state before tag is destroyed)
+      // Force mode — detach products from tag
       await ProductTag.destroy({ where: { tag_id: id } });
     }
 
     const lightspeedTagId = tag.lightspeed_tag_id;
 
-    // Log the Lightspeed payload that would be sent (READ-ONLY mode)
-    logger.info(
-      `[READ-ONLY] Lightspeed Tag DELETE payload (not sent): DELETE /Tag/${lightspeedTagId}.json`
-    );
+    const isReadOnly = await LightspeedService.isReadOnlyMode();
+
+    // ─── READ-ONLY BRANCH ──────────────────────────────────────────────────
+    // If READ Only flag is true, only show the delete payload in console and do not write to POS or DB.
+    if (isReadOnly) {
+      console.log(
+        `[READ-ONLY] Lightspeed Tag DELETE payload for tag ID ${lightspeedTagId}: DELETE /Tag/${lightspeedTagId}.json`
+      );
+      logger.info(
+        `[READ-ONLY] Lightspeed Tag DELETE payload (not sent): DELETE /Tag/${lightspeedTagId}.json`
+      );
+
+      return res.sendSuccess(res, {
+        message: 'Read-only mode is active. Delete payload displayed in console (no writes performed to POS or Database).',
+        tagID: lightspeedTagId,
+      });
+    }
+
+    // ─── WRITE ACCESS BRANCH ───────────────────────────────────────────────
+    // When read-only mode is disabled, proceed with delete in Lightspeed POS and local Database.
+    if (lightspeedTagId && !lightspeedTagId.startsWith('local_')) {
+      logger.info(`Deleting tag ${lightspeedTagId} in Lightspeed POS via DELETE...`);
+      await LightspeedService.deleteTag(lightspeedTagId);
+    }
 
     await tag.destroy();
 
+    if (lightspeedTagId) {
+      await LightspeedEntityMap.destroy({
+        where: {
+          entity_type: 'tag',
+          lightspeed_id: lightspeedTagId,
+        },
+      });
+    }
+
     return res.sendSuccess(res, {
-      message: `Tag '${tag.name}' deleted successfully (local only — READ-ONLY mode active).`,
+      message: `Tag '${tag.name}' deleted successfully from Lightspeed and local database.`,
       ...(productCount > 0
         ? {
             warning: `${productCount} product association${productCount === 1 ? ' was' : 's were'} removed.`,
