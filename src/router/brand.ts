@@ -9,10 +9,10 @@ router.get('/', getBrands);
 // Retrieve a single brand's details (sync info)
 router.get('/:id', getBrand);
 
-// Create a new brand locally (logs Lightspeed payload)
+// Create a new brand
 router.post('/', createBrand);
 
-// Update a brand locally (logs Lightspeed payload)
+// Update a brand
 router.put('/:id', updateBrand);
 
 export default router;

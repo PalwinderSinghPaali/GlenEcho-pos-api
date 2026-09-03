@@ -7,6 +7,7 @@ import {
   updateProduct,
   deleteProduct,
   uploadProductImages,
+  deleteProductImage,
   uploadProductsCSV,
   searchProducts,
 } from '@/controllers/product';
@@ -71,5 +72,9 @@ router.delete('/:id', deleteProduct);
 
 // 7. Upload images for a product
 router.post('/:id/images', upload.array('images', 20), uploadProductImages);
+
+// 8. Delete an image for a product
+router.delete('/:id/images/:imageId', deleteProductImage);
+router.delete('/:id/image/:imageId', deleteProductImage);
 
 export default router;

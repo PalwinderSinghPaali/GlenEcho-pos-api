@@ -11,14 +11,14 @@ import accessControl from '@/middleware/access-control';
 
 const router = Router();
 
-router.use(accessControl);
-// router.use(accessAdmin);
-
 // Retrieve all tags (flat, paginated, searchable)
 router.get('/', getTags);
 
 // Retrieve a single tag's details (sync info)
 router.get('/:id', getTag);
+
+// router.use(accessControl);
+// router.use(accessAdmin);
 
 // Create a new tag locally (logs Lightspeed payload)
 router.post('/', createTag);

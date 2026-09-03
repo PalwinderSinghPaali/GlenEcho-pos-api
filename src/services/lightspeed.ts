@@ -307,7 +307,11 @@ export class LightspeedService {
     const headers = new Headers(options.headers);
     headers.set('Authorization', `Bearer ${accessToken}`);
     headers.set('Accept', 'application/json');
-    if (!headers.has('Content-Type') && options.body) {
+    if (
+      !headers.has('Content-Type') &&
+      options.body &&
+      !(typeof FormData !== 'undefined' && options.body instanceof FormData)
+    ) {
       headers.set('Content-Type', 'application/json');
     }
 
@@ -2256,6 +2260,109 @@ export class LightspeedService {
     const path = `Item/${lightspeedItemId}.json`;
     logger.info(`Archiving product ${lightspeedItemId} in Lightspeed...`);
     return this.makeRequest(path, { method: 'DELETE' });
+  }
+
+  /**
+   * createProduct - creates an item in Lightspeed POS
+   */
+  public static async createProduct(payload: any): Promise<any> {
+    logger.info('Creating product/item in Lightspeed POS with payload:', payload);
+    return this.makeRequest('Item.json', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /**
+   * updateProduct - updates an item in Lightspeed POS
+   */
+  public static async updateProduct(lightspeedItemId: string, payload: any): Promise<any> {
+    const path = `Item/${lightspeedItemId}.json`;
+    logger.info(`Updating product/item ${lightspeedItemId} in Lightspeed POS with payload:`, payload);
+    return this.makeRequest(path, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /**
+   * getItem - retrieves a single item from Lightspeed POS with optional query parameters
+   */
+  public static async getItem(lightspeedItemId: string, queryParams: string = ''): Promise<any> {
+    const query = queryParams ? (queryParams.startsWith('?') ? queryParams : `?${queryParams}`) : '';
+    const path = `Item/${lightspeedItemId}.json${query}`;
+    return this.makeRequest(path, { method: 'GET' });
+  }
+
+  /**
+   * updateItemQOH - updates QOH on an ItemShop via Item endpoint in Lightspeed POS
+   * As per Lightspeed API:
+   * PUT /API/V3/Account/{accountID}/Item/{itemID}.json
+   * { "ItemShops": { "ItemShop": { "itemShopID": 123, "qoh": 25 } } }
+   */
+  public static async updateItemQOH(
+    lightspeedItemId: string,
+    itemShopUpdates: any
+  ): Promise<any> {
+    const path = `Item/${lightspeedItemId}.json`;
+    const payload = {
+      ItemShops: {
+        ItemShop: itemShopUpdates,
+      },
+    };
+    logger.info(`Updating QOH for item ${lightspeedItemId} in Lightspeed POS:`, payload);
+    return this.makeRequest(path, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /**
+   * uploadItemImage - uploads an image file for an item in Lightspeed POS
+   */
+  public static async uploadItemImage(
+    lightspeedItemId: string,
+    fileBuffer: Buffer,
+    filename: string,
+    mimetype: string,
+    data: any = {}
+  ): Promise<any> {
+    const path = `Item/${lightspeedItemId}/Image.json`;
+    logger.info(`Uploading image for item ${lightspeedItemId} to Lightspeed POS: ${filename}`);
+
+    const formData = new FormData();
+    formData.append(
+      'data',
+      JSON.stringify({
+        description: data.description || filename,
+        ordering: data.ordering !== undefined ? data.ordering : 0,
+        itemID: parseInt(lightspeedItemId, 10),
+      })
+    );
+    formData.append('image', new Blob([fileBuffer], { type: mimetype }), filename);
+
+    return this.makeRequest(path, {
+      method: 'POST',
+      body: formData as any,
+    });
+  }
+
+  /**
+   * deleteItemImage - deletes an image in Lightspeed POS via DELETE
+   */
+  public static async deleteItemImage(lightspeedImageId: string, lightspeedItemId?: string): Promise<any> {
+    let path = `Image/${lightspeedImageId}.json`;
+    logger.info(`Deleting image ${lightspeedImageId} in Lightspeed POS via DELETE...`);
+    try {
+      return await this.makeRequest(path, { method: 'DELETE' });
+    } catch (err: any) {
+      if (lightspeedItemId) {
+        path = `Item/${lightspeedItemId}/Image/${lightspeedImageId}.json`;
+        logger.info(`Retrying deleting image with path ${path}...`);
+        return await this.makeRequest(path, { method: 'DELETE' });
+      }
+      throw err;
+    }
   }
 
   /**
