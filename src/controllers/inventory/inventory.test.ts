@@ -174,72 +174,17 @@ describe('Inventory Controllers', () => {
   });
 
   describe('updateInventory', () => {
-    it('should update inventory locally and enqueue a Lightspeed sync job if not read-only', async () => {
-      mockRequest.params = { id: '1' };
-      mockRequest.body = { reorder_point: '5', reorder_level: '10' };
-
-      const mockInventory = {
-        id: 1,
-        qoh: 10,
-        unit_cost: 5.5,
-        reorder_point: 2,
-        reorder_level: 5,
-        lightspeed_item_shop_id: '12345',
-        update: jest.fn().mockResolvedValue(true),
-        toJSON: function() { return this; },
-      };
-
-      (ProductInventory.findByPk as jest.Mock).mockResolvedValue(mockInventory);
-      (LightspeedService.enqueuePushJob as jest.Mock).mockResolvedValue({ id: 999 });
-
+    it('should return error for invalid inventory ID', async () => {
+      mockRequest.params = { id: 'abc' };
       await updateInventory(mockRequest as Request, mockResponse as Response);
-
-      expect(mockInventory.update).toHaveBeenCalledWith({
-        reorder_point: 5,
-        reorder_level: 10,
-      });
-      expect(LightspeedService.enqueuePushJob).toHaveBeenCalledWith('PUSH_ITEM_SHOP', {
-        lightspeedItemShopId: '12345',
-        changedFields: {
-          reorderPoint: '5',
-          reorderLevel: '10',
-        },
-      });
-      expect(mockResponse.sendSuccess).toHaveBeenCalledWith(
-        mockResponse,
-        expect.objectContaining({
-          message: 'Inventory record updated successfully and sync job queued.',
-        })
-      );
+      expect(mockResponse.sendError).toHaveBeenCalledWith(mockResponse, 'Invalid inventory ID.');
     });
 
-    it('should update locally but not enqueue if queueing fails (e.g., in read-only mode)', async () => {
-      mockRequest.params = { id: '1' };
-      mockRequest.body = { reorder_point: '5' };
-
-      const mockInventory = {
-        id: 1,
-        qoh: 10,
-        unit_cost: 5.5,
-        reorder_point: 2,
-        reorder_level: 5,
-        lightspeed_item_shop_id: '12345',
-        update: jest.fn().mockResolvedValue(true),
-        toJSON: function() { return this; },
-      };
-
-      (ProductInventory.findByPk as jest.Mock).mockResolvedValue(mockInventory);
-      (LightspeedService.enqueuePushJob as jest.Mock).mockResolvedValue(null);
-
+    it('should return error when inventory record not found', async () => {
+      mockRequest.params = { id: '999' };
+      (ProductInventory.findByPk as jest.Mock).mockResolvedValue(null);
       await updateInventory(mockRequest as Request, mockResponse as Response);
-
-      expect(mockInventory.update).toHaveBeenCalled();
-      expect(mockResponse.sendSuccess).toHaveBeenCalledWith(
-        mockResponse,
-        expect.objectContaining({
-          message: 'Inventory record updated successfully (local only — read-only mode or no Lightspeed map).',
-        })
-      );
+      expect(mockResponse.sendError).toHaveBeenCalledWith(mockResponse, 'Inventory record not found.');
     });
 
     it('should return error if no valid fields are provided to update', async () => {
@@ -277,6 +222,98 @@ describe('Inventory Controllers', () => {
       expect(mockResponse.sendError).toHaveBeenCalledWith(
         mockResponse,
         'reorder_point and reorder_level must be valid numbers.'
+      );
+    });
+
+    it('should return error if qoh is provided in body', async () => {
+      mockRequest.params = { id: '1' };
+      mockRequest.body = { qoh: 25 };
+
+      const mockInventory = {
+        id: 1,
+        reorder_point: 2,
+        reorder_level: 5,
+      };
+      (ProductInventory.findByPk as jest.Mock).mockResolvedValue(mockInventory);
+
+      await updateInventory(mockRequest as Request, mockResponse as Response);
+
+      expect(mockResponse.sendError).toHaveBeenCalledWith(
+        mockResponse,
+        'QOH cannot be updated directly via ItemShop inventory endpoint. Only reorder_point and reorder_level are supported as per Lightspeed documentation.'
+      );
+    });
+
+    it('should only show payload in console and not write to POS or DB when read-only mode is true', async () => {
+      mockRequest.params = { id: '1' };
+      mockRequest.body = { reorder_point: '5', reorder_level: '10' };
+
+      const mockInventory = {
+        id: 1,
+        qoh: 10,
+        unit_cost: 5.5,
+        reorder_point: 2,
+        reorder_level: 5,
+        lightspeed_item_shop_id: '12345',
+        update: jest.fn(),
+        toJSON: function () {
+          return this;
+        },
+      };
+
+      (ProductInventory.findByPk as jest.Mock).mockResolvedValue(mockInventory);
+      (LightspeedService.isReadOnlyMode as jest.Mock).mockResolvedValue(true);
+
+      await updateInventory(mockRequest as Request, mockResponse as Response);
+
+      expect(mockInventory.update).not.toHaveBeenCalled();
+      expect(LightspeedService.updateItemShop).not.toHaveBeenCalled();
+      expect(mockResponse.sendSuccess).toHaveBeenCalledWith(
+        mockResponse,
+        expect.objectContaining({
+          message: expect.stringContaining('Read-only mode is active'),
+        })
+      );
+    });
+
+    it('should update ItemShop in Lightspeed POS and local DB when read-only mode is false', async () => {
+      mockRequest.params = { id: '1' };
+      mockRequest.body = { reorder_point: 5, reorder_level: 10 };
+
+      const mockInventory = {
+        id: 1,
+        qoh: 10,
+        unit_cost: 5.5,
+        reorder_point: 2,
+        reorder_level: 5,
+        lightspeed_item_shop_id: '12345',
+        update: jest.fn().mockResolvedValue(true),
+        toJSON: function () {
+          return this;
+        },
+      };
+
+      (ProductInventory.findByPk as jest.Mock).mockResolvedValue(mockInventory);
+      (LightspeedService.isReadOnlyMode as jest.Mock).mockResolvedValue(false);
+      (LightspeedService.updateItemShop as jest.Mock).mockResolvedValue({});
+
+      await updateInventory(mockRequest as Request, mockResponse as Response);
+
+      expect(LightspeedService.updateItemShop).toHaveBeenCalledWith('12345', {
+        reorderPoint: '5',
+        reorderLevel: '10',
+      });
+      expect(mockInventory.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reorder_point: 5,
+          reorder_level: 10,
+        })
+      );
+      expect(mockResponse.sendSuccess).toHaveBeenCalledWith(
+        mockResponse,
+        expect.objectContaining({
+          message: 'Inventory record updated successfully in Lightspeed POS and local database.',
+        })
       );
     });
   });

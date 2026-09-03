@@ -140,7 +140,7 @@ export const getInventory = async (req: Request, res: Response) => {
 };
 
 // ---------------------------------------------------------------------------
-// 3. PUT /inventory/:id — Update inventory record locally (maps to PUT /ItemShop/{itemShopID}.json)
+// 3. PUT /inventory/:id — Update inventory record (maps to PUT /ItemShop/{itemShopID}.json)
 // ---------------------------------------------------------------------------
 
 export const updateInventory = async (req: Request, res: Response) => {
@@ -161,62 +161,116 @@ export const updateInventory = async (req: Request, res: Response) => {
       return res.sendError(res, 'Inventory record not found.');
     }
 
-    const { reorder_point, reorder_level } = req.body as {
+    const { reorder_point, reorder_level, reorderPoint, reorderLevel, qoh } = req.body as {
       reorder_point?: unknown;
       reorder_level?: unknown;
+      reorderPoint?: unknown;
+      reorderLevel?: unknown;
+      qoh?: unknown;
     };
 
-    if (reorder_point === undefined && reorder_level === undefined) {
-      return res.sendError(res, 'Only reorder_point and reorder_level can be updated on ItemShop.');
+    if (qoh !== undefined) {
+      return res.sendError(
+        res,
+        'QOH cannot be updated directly via ItemShop inventory endpoint. Only reorder_point and reorder_level are supported as per Lightspeed documentation.'
+      );
     }
 
-    const newRepoint = reorder_point !== undefined ? Number(reorder_point) : inventory.reorder_point;
-    const newRelevel = reorder_level !== undefined ? Number(reorder_level) : inventory.reorder_level;
+    const resolvedRepoint =
+      reorder_point !== undefined ? reorder_point : reorderPoint;
+    const resolvedRelevel =
+      reorder_level !== undefined ? reorder_level : reorderLevel;
+
+    if (resolvedRepoint === undefined && resolvedRelevel === undefined) {
+      return res.sendError(
+        res,
+        'Only reorder_point and reorder_level can be updated on ItemShop.'
+      );
+    }
+
+    const newRepoint =
+      resolvedRepoint !== undefined ? Number(resolvedRepoint) : inventory.reorder_point;
+    const newRelevel =
+      resolvedRelevel !== undefined ? Number(resolvedRelevel) : inventory.reorder_level;
 
     if (isNaN(newRepoint) || isNaN(newRelevel)) {
-      return res.sendError(res, 'reorder_point and reorder_level must be valid numbers.');
+      return res.sendError(
+        res,
+        'reorder_point and reorder_level must be valid numbers.'
+      );
     }
 
     const product = (inventory as any).product;
     const shop = (inventory as any).shop;
 
-    // Log the Lightspeed ItemShop PUT payload that would be sent (READ-ONLY mode)
-    logger.info(
-      `[READ-ONLY] Lightspeed ItemShop UPDATE payload (not sent): PUT /ItemShop/local_itemshop_${inventory.id}.json (Item: ${product?.lightspeed_item_id || 'N/A'}, Shop: ${shop?.lightspeed_shop_id || 'N/A'}) ` +
-        JSON.stringify({
-          reorderPoint: String(newRepoint),
-          reorderLevel: String(newRelevel),
-        })
-    );
+    // Prepare Lightspeed ItemShop PUT payload (PUT /ItemShop/{itemShopID}.json)
+    const lsItemShopPayload: Record<string, string> = {};
+    if (resolvedRepoint !== undefined) {
+      lsItemShopPayload.reorderPoint = String(newRepoint);
+    }
+    if (resolvedRelevel !== undefined) {
+      lsItemShopPayload.reorderLevel = String(newRelevel);
+    }
 
-    // Persist locally
+    const isReadOnly = await LightspeedService.isReadOnlyMode();
+
+    // ─── READ-ONLY BRANCH ──────────────────────────────────────────────────
+    // If READ Only flag is true, only show the payload in console and do not write to POS or DB.
+    if (isReadOnly) {
+      const debugPayload = {
+        itemShopID: inventory.lightspeed_item_shop_id || `local_itemshop_${inventory.id}`,
+        item: product?.lightspeed_item_id || 'N/A',
+        shop: shop?.lightspeed_shop_id || 'N/A',
+        endpoint: `PUT /ItemShop/${inventory.lightspeed_item_shop_id || `local_${inventory.id}`}.json`,
+        payload: lsItemShopPayload,
+      };
+
+      console.log(
+        `[READ-ONLY] Lightspeed ItemShop UPDATE payload for inventory ID ${inventory.id}:\n`,
+        JSON.stringify(debugPayload, null, 2)
+      );
+      logger.info(
+        `[READ-ONLY] Lightspeed ItemShop UPDATE payload (not sent): PUT /ItemShop/${inventory.lightspeed_item_shop_id || `local_${inventory.id}`}.json ${JSON.stringify(debugPayload)}`
+      );
+
+      return res.sendSuccess(res, {
+        message:
+          'Read-only mode is active. Payload displayed in console (no writes performed to POS or Database).',
+        payload: debugPayload,
+      });
+    }
+
+    // ─── WRITE ACCESS BRANCH ───────────────────────────────────────────────
+    // When read-only mode is disabled, proceed with write access to Lightspeed POS and local Database.
+
+    // 1. Update reorderPoint/reorderLevel on Lightspeed POS via PUT /ItemShop/{itemShopID}.json
+    if (
+      Object.keys(lsItemShopPayload).length > 0 &&
+      inventory.lightspeed_item_shop_id &&
+      !inventory.lightspeed_item_shop_id.startsWith('local_')
+    ) {
+      logger.info(
+        `Updating ItemShop ${inventory.lightspeed_item_shop_id} in Lightspeed POS via PUT:`,
+        lsItemShopPayload
+      );
+      await LightspeedService.updateItemShop(
+        inventory.lightspeed_item_shop_id,
+        lsItemShopPayload
+      );
+    }
+
+    // 2. Persist locally in Database
     await inventory.update({
       reorder_point: newRepoint,
       reorder_level: newRelevel,
     });
 
-    let queued = false;
-    if (inventory.lightspeed_item_shop_id) {
-      const job = await LightspeedService.enqueuePushJob('PUSH_ITEM_SHOP', {
-        lightspeedItemShopId: inventory.lightspeed_item_shop_id,
-        changedFields: {
-          reorderPoint: String(newRepoint),
-          reorderLevel: String(newRelevel),
-        },
-      });
-      if (job) {
-        queued = true;
-      }
-    }
-
     return res.sendSuccess(res, {
       inventory: formatInventory(inventory),
-      message: queued
-        ? 'Inventory record updated successfully and sync job queued.'
-        : 'Inventory record updated successfully (local only — read-only mode or no Lightspeed map).',
+      message: 'Inventory record updated successfully in Lightspeed POS and local database.',
     });
   } catch (error: unknown) {
-    console.error(error);
+    logger.error(error);
     return res.sendError(res, (error as Error).message || 'ERR_INTERNAL_SERVER_ERROR');
   }
 };
