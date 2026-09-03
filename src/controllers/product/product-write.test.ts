@@ -41,6 +41,7 @@ import {
   Product,
   Brand,
   Category,
+  Vendor,
   ProductMatrix,
   ProductImage,
   ProductInventory,
@@ -74,6 +75,8 @@ describe('Product Write Controllers', () => {
     Product.update = jest.fn();
     Brand.findByPk = jest.fn();
     Category.findByPk = jest.fn();
+    Vendor.findByPk = jest.fn();
+    Vendor.findOne = jest.fn();
     ProductMatrix.findByPk = jest.fn();
     ProductImage.count = jest.fn();
     ProductImage.create = jest.fn();
@@ -83,6 +86,8 @@ describe('Product Write Controllers', () => {
     ProductInventory.findOne = jest.fn();
     ProductInventory.findOrCreate = jest.fn();
     ProductInventory.destroy = jest.fn();
+    ProductVendor.create = jest.fn();
+    ProductVendor.findAll = jest.fn();
     ProductVendor.destroy = jest.fn();
     ProductTag.destroy = jest.fn();
     ProductTag.bulkCreate = jest.fn();
@@ -260,6 +265,112 @@ describe('Product Write Controllers', () => {
           { product_id: 20, tag_id: 101 },
           { product_id: 20, tag_id: 102 },
         ],
+        expect.any(Object)
+      );
+    });
+
+    it('should include defaultVendorID and ItemVendorNums in payload and persist ProductVendor when provided on create', async () => {
+      mockRequest.body = {
+        description: 'Vendor Seed Pack',
+        price: 9.99,
+        vendor_id: 3,
+        vendor_sku: 'V-SEED-01',
+        vendor_cost: 4.5,
+      };
+
+      (Vendor.findByPk as jest.Mock).mockResolvedValue({ id: 3, lightspeed_vendor_id: '88' });
+      (LightspeedService.isReadOnlyMode as jest.Mock).mockResolvedValue(false);
+      (LightspeedService.createProduct as jest.Mock).mockResolvedValue({
+        Item: { itemID: '488', systemSku: '210000000488', description: 'Vendor Seed Pack' },
+      });
+      (LightspeedService.extractList as jest.Mock).mockReturnValue([
+        { itemID: '488', systemSku: '210000000488', description: 'Vendor Seed Pack' },
+      ]);
+      (LightspeedService.calculateHash as jest.Mock).mockReturnValue('mockvendorhash');
+
+      const mockCreated = {
+        id: 50,
+        lightspeed_item_id: '488',
+        description: 'Vendor Seed Pack',
+        price: 9.99,
+        toJSON: () => ({ id: 50, lightspeed_item_id: '488', description: 'Vendor Seed Pack' }),
+      };
+      (Product.create as jest.Mock).mockResolvedValue(mockCreated);
+
+      await createProduct(mockRequest as Request, mockResponse as Response);
+
+      expect(LightspeedService.createProduct).toHaveBeenCalledWith(
+        expect.objectContaining({
+          description: 'Vendor Seed Pack',
+          defaultVendorID: '88',
+          ItemVendorNums: {
+            ItemVendorNum: {
+              vendorID: '88',
+              value: 'V-SEED-01',
+              cost: '4.5',
+            },
+          },
+        })
+      );
+      expect(ProductVendor.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          product_id: 50,
+          vendor_id: 3,
+          vendor_sku: 'V-SEED-01',
+          vendor_cost: 4.5,
+          is_primary: true,
+        }),
+        expect.any(Object)
+      );
+    });
+
+    it('should set defaultVendorID and fallback vendor cost to default_cost when only dropdown vendor is provided', async () => {
+      mockRequest.body = {
+        description: 'Rose Fertilizer',
+        price: 15.0,
+        default_cost: 6.5,
+        vendor_id: 3,
+      };
+
+      (Vendor.findByPk as jest.Mock).mockResolvedValue({ id: 3, lightspeed_vendor_id: '88' });
+      (LightspeedService.isReadOnlyMode as jest.Mock).mockResolvedValue(false);
+      (LightspeedService.createProduct as jest.Mock).mockResolvedValue({
+        Item: { itemID: '489', systemSku: '210000000489', description: 'Rose Fertilizer' },
+      });
+      (LightspeedService.extractList as jest.Mock).mockReturnValue([
+        { itemID: '489', systemSku: '210000000489', description: 'Rose Fertilizer' },
+      ]);
+      (LightspeedService.calculateHash as jest.Mock).mockReturnValue('mockhashfert');
+
+      const mockCreated = {
+        id: 51,
+        lightspeed_item_id: '489',
+        description: 'Rose Fertilizer',
+        price: 15.0,
+        default_cost: 6.5,
+        toJSON: () => ({ id: 51, lightspeed_item_id: '489', description: 'Rose Fertilizer' }),
+      };
+      (Product.create as jest.Mock).mockResolvedValue(mockCreated);
+
+      await createProduct(mockRequest as Request, mockResponse as Response);
+
+      expect(LightspeedService.createProduct).toHaveBeenCalledWith(
+        expect.objectContaining({
+          description: 'Rose Fertilizer',
+          defaultVendorID: '88',
+        })
+      );
+      const sentPayload = (LightspeedService.createProduct as jest.Mock).mock.calls[0][0];
+      expect(sentPayload.ItemVendorNums).toBeUndefined();
+
+      expect(ProductVendor.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          product_id: 51,
+          vendor_id: 3,
+          vendor_sku: null,
+          vendor_cost: 6.5,
+          is_primary: true,
+        }),
         expect.any(Object)
       );
     });
@@ -520,6 +631,7 @@ describe('Product Write Controllers', () => {
         '401',
         expect.objectContaining({
           taxClassID: '2',
+          Tags: { tag: 'Indoor' },
         })
       );
       expect(mockProduct.update).toHaveBeenCalledWith(
@@ -533,6 +645,111 @@ describe('Product Write Controllers', () => {
       );
       expect(ProductTag.bulkCreate).toHaveBeenCalledWith(
         [{ product_id: 1, tag_id: 201 }],
+        expect.any(Object)
+      );
+    });
+
+    it('should update reorder_point and reorder_level on ItemShop and ProductInventory on update', async () => {
+      mockRequest.params = { id: '1' };
+      mockRequest.body = {
+        reorder_point: 5,
+        reorder_level: 15,
+        tags: ['2025'],
+      };
+
+      const mockProduct = {
+        id: 1,
+        lightspeed_item_id: '401',
+        description: 'Plant',
+        update: jest.fn().mockResolvedValue(true),
+        toJSON: () => ({ id: 1, lightspeed_item_id: '401', description: 'Plant' }),
+      };
+
+      const mockInventory = {
+        id: 10,
+        product_id: 1,
+        shop_id: 1,
+        reorder_point: 0,
+        reorder_level: 0,
+        lightspeed_item_shop_id: '9991',
+        update: jest.fn().mockResolvedValue(true),
+      };
+
+      (Product.findByPk as jest.Mock).mockResolvedValue(mockProduct);
+      (ProductInventory.findAll as jest.Mock).mockResolvedValue([mockInventory]);
+      (LightspeedService.isReadOnlyMode as jest.Mock).mockResolvedValue(false);
+      (LightspeedService.updateProduct as jest.Mock).mockResolvedValue({});
+      (LightspeedService.updateItemShop as jest.Mock).mockResolvedValue({});
+      (Tag.findOrCreate as jest.Mock).mockResolvedValueOnce([{ id: 301, name: '2025' }]);
+      (LightspeedService.calculateHash as jest.Mock).mockReturnValue('mockhash3');
+
+      await updateProduct(mockRequest as Request, mockResponse as Response);
+
+      expect(LightspeedService.updateProduct).toHaveBeenCalledWith(
+        '401',
+        expect.objectContaining({
+          Tags: { tag: '2025' },
+        })
+      );
+      expect(LightspeedService.updateItemShop).toHaveBeenCalledWith('9991', {
+        reorderPoint: '5',
+        reorderLevel: '15',
+      });
+      expect(mockInventory.update).toHaveBeenCalledWith(
+        {
+          reorder_point: 5,
+          reorder_level: 15,
+        },
+        expect.any(Object)
+      );
+    });
+
+    it('should update defaultVendorID and ItemVendorNums and sync ProductVendor records on update', async () => {
+      mockRequest.params = { id: '1' };
+      mockRequest.body = {
+        vendors: [
+          { vendor_id: 3, vendor_sku: 'V-NEW-02', vendor_cost: 5.5, is_primary: true },
+        ],
+      };
+
+      const mockProduct = {
+        id: 1,
+        lightspeed_item_id: '401',
+        description: 'Plant',
+        update: jest.fn().mockResolvedValue(true),
+        toJSON: () => ({ id: 1, lightspeed_item_id: '401', description: 'Plant' }),
+      };
+
+      (Product.findByPk as jest.Mock).mockResolvedValue(mockProduct);
+      (Vendor.findByPk as jest.Mock).mockResolvedValue({ id: 3, lightspeed_vendor_id: '88' });
+      (ProductVendor.findAll as jest.Mock).mockResolvedValue([]);
+      (LightspeedService.isReadOnlyMode as jest.Mock).mockResolvedValue(false);
+      (LightspeedService.updateProduct as jest.Mock).mockResolvedValue({});
+      (LightspeedService.calculateHash as jest.Mock).mockReturnValue('mockvendorupdatehash');
+
+      await updateProduct(mockRequest as Request, mockResponse as Response);
+
+      expect(LightspeedService.updateProduct).toHaveBeenCalledWith(
+        '401',
+        expect.objectContaining({
+          defaultVendorID: '88',
+          ItemVendorNums: {
+            ItemVendorNum: {
+              vendorID: '88',
+              value: 'V-NEW-02',
+              cost: '5.5',
+            },
+          },
+        })
+      );
+      expect(ProductVendor.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          product_id: 1,
+          vendor_id: 3,
+          vendor_sku: 'V-NEW-02',
+          vendor_cost: 5.5,
+          is_primary: true,
+        }),
         expect.any(Object)
       );
     });

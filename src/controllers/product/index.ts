@@ -60,6 +60,29 @@ async function formatProduct(product: Product, syncInfoMap?: Map<string, any>) {
     systemID: product.system_sku,
     customSKU: product.custom_sku,
     manufacturerSKU: product.manufacturer_sku,
+    defaultVendorID:
+      (json as any).productVendors?.find((pv: any) => pv.is_primary)?.vendor?.lightspeed_vendor_id ||
+      (json as any).productVendors?.find((pv: any) => pv.is_primary)?.vendor_id?.toString() ||
+      '0',
+    ItemVendorNums:
+      (json as any).productVendors && (json as any).productVendors.length > 0
+        ? {
+            ItemVendorNum: (json as any).productVendors.map((pv: any) => ({
+              itemVendorNumID: pv.lightspeed_item_vendor_num_id || String(pv.id),
+              value: pv.vendor_sku,
+              vendorID: pv.vendor?.lightspeed_vendor_id || String(pv.vendor_id),
+              cost: String(pv.vendor_cost || 0),
+            })),
+          }
+        : null,
+    Tags: (json as any).tags
+      ? {
+          tag: (json as any).tags.map((t: any) => ({
+            tagID: t.lightspeed_tag_id || String(t.id),
+            name: t.name,
+          })),
+        }
+      : null,
     Note: product.note
       ? {
           note: product.note,
@@ -71,6 +94,204 @@ async function formatProduct(product: Product, syncInfoMap?: Map<string, any>) {
     timeStamp: product.updatedAt,
     lightspeed_sync_info: syncInfo,
   };
+}
+
+export interface ResolvedProductVendor {
+  vendorId: number;
+  lightspeedVendorId: string;
+  vendorSku: string | null;
+  vendorCost: number;
+  isPrimary: boolean;
+}
+
+/**
+ * Normalizes and resolves vendors from various input shapes:
+ * - Dropdown vendor: vendor_id, vendorId, default_vendor_id, defaultVendorID, vendor (by ID or name)
+ * - "Vendor ID" text field: vendor_sku, vendorSku, vendor_code, vendor_item_id, vendor_item_number, vendor_number, etc.
+ * - Cost: vendor_cost or fallback to item default_cost (as in POS UI where Vendor Cost defaults to Default Cost)
+ * - Array of vendors: vendors, product_vendors, productVendors, ItemVendorNums
+ */
+async function resolveVendorsFromInput(body: any): Promise<ResolvedProductVendor[]> {
+  const resolvedList: ResolvedProductVendor[] = [];
+  const processedVendorIds = new Set<number>();
+
+  const rawVendors = Array.isArray(body.vendors)
+    ? body.vendors
+    : (Array.isArray(body.product_vendors)
+      ? body.product_vendors
+      : (Array.isArray(body.productVendors)
+        ? body.productVendors
+        : (body.ItemVendorNums?.ItemVendorNum
+          ? (Array.isArray(body.ItemVendorNums.ItemVendorNum)
+            ? body.ItemVendorNums.ItemVendorNum
+            : [body.ItemVendorNums.ItemVendorNum])
+          : [])));
+
+  // Fallback default cost from the item itself (as seen in POS UI where Vendor Cost = Default Cost)
+  const defaultItemCost =
+    body.default_cost !== undefined
+      ? Number(body.default_cost)
+      : (body.defaultCost !== undefined ? Number(body.defaultCost) : 0);
+
+  // 1. Process array of vendors if provided
+  for (const v of rawVendors) {
+    const vId = v.vendor_id || v.vendorId || v.vendorID || v.id;
+    if (vId === undefined || vId === null || String(vId) === '0') continue;
+
+    let dbVendor: Vendor | null = null;
+    const numId = Number(vId);
+    if (!isNaN(numId)) {
+      dbVendor = await Vendor.findByPk(numId);
+    }
+    if (!dbVendor) {
+      dbVendor = await Vendor.findOne({ where: { lightspeed_vendor_id: String(vId) } });
+    }
+    if (!dbVendor) {
+      const vMap = await LightspeedEntityMap.findOne({
+        where: { entity_type: 'vendor', lightspeed_id: String(vId) },
+      });
+      if (vMap) {
+        dbVendor = await Vendor.findByPk(vMap.local_id);
+      }
+    }
+    if (!dbVendor && typeof vId === 'string') {
+      dbVendor = await Vendor.findOne({ where: { name: vId.trim() } });
+    }
+
+    if (dbVendor && !processedVendorIds.has(dbVendor.id)) {
+      processedVendorIds.add(dbVendor.id);
+      const sku =
+        v.vendor_sku !== undefined
+          ? v.vendor_sku
+          : (v.vendorSku !== undefined
+            ? v.vendorSku
+            : (v.value !== undefined
+              ? v.value
+              : (v.vendor_code !== undefined
+                ? v.vendor_code
+                : (v.vendor_item_id !== undefined ? v.vendor_item_id : null))));
+
+      const cost =
+        v.vendor_cost !== undefined
+          ? Number(v.vendor_cost)
+          : (v.vendorCost !== undefined
+            ? Number(v.vendorCost)
+            : (v.cost !== undefined
+              ? Number(v.cost)
+              : (!isNaN(defaultItemCost) ? defaultItemCost : 0)));
+
+      const isPrimary =
+        v.is_primary === true ||
+        v.is_primary === 'true' ||
+        v.isPrimary === true ||
+        v.isPrimary === 'true' ||
+        v.isDefault === true;
+
+      resolvedList.push({
+        vendorId: dbVendor.id,
+        lightspeedVendorId: dbVendor.lightspeed_vendor_id || '0',
+        vendorSku: sku ? String(sku).trim() : null,
+        vendorCost: isNaN(cost) ? 0 : cost,
+        isPrimary,
+      });
+    }
+  }
+
+  // 2. Identify single vendor from dropdown and "Vendor ID" text field
+  const rawDropdownVendor =
+    body.vendor !== undefined
+      ? body.vendor
+      : (body.default_vendor_id !== undefined
+        ? body.default_vendor_id
+        : (body.defaultVendorID !== undefined
+          ? body.defaultVendorID
+          : (body.vendor_id !== undefined ? body.vendor_id : (body.vendorId !== undefined ? body.vendorId : undefined))));
+
+  let rawSingleVendorSku =
+    body.vendor_sku !== undefined
+      ? body.vendor_sku
+      : (body.vendorSku !== undefined
+        ? body.vendorSku
+        : (body.vendor_code !== undefined
+          ? body.vendor_code
+          : (body.vendorCode !== undefined
+            ? body.vendorCode
+            : (body.vendor_item_id !== undefined
+              ? body.vendor_item_id
+              : (body.vendorItemId !== undefined
+                ? body.vendorItemId
+                : (body.vendor_item_number !== undefined
+                  ? body.vendor_item_number
+                  : (body.vendorItemNumber !== undefined
+                    ? body.vendorItemNumber
+                    : (body.vendor_number !== undefined
+                      ? body.vendor_number
+                      : (body.vendorNumber !== undefined ? body.vendorNumber : undefined)))))))));
+
+  // If dropdown was specified via body.vendor or default_vendor_id, and body.vendor_id is a different value,
+  // it corresponds to the "Vendor ID" input box in the UI
+  if (!rawSingleVendorSku && (body.vendor !== undefined || body.default_vendor_id !== undefined || body.defaultVendorID !== undefined)) {
+    if (body.vendor_id !== undefined && String(body.vendor_id) !== String(rawDropdownVendor)) {
+      rawSingleVendorSku = body.vendor_id;
+    }
+  }
+
+  const rawSingleVendorCost =
+    body.vendor_cost !== undefined
+      ? body.vendor_cost
+      : (body.vendorCost !== undefined ? body.vendorCost : (!isNaN(defaultItemCost) ? defaultItemCost : 0));
+
+  if (rawDropdownVendor !== undefined && rawDropdownVendor !== null && String(rawDropdownVendor).trim() !== '' && String(rawDropdownVendor) !== '0') {
+    let dbVendor: Vendor | null = null;
+    const numId = Number(rawDropdownVendor);
+    if (!isNaN(numId)) {
+      dbVendor = await Vendor.findByPk(numId);
+    }
+    if (!dbVendor) {
+      dbVendor = await Vendor.findOne({ where: { lightspeed_vendor_id: String(rawDropdownVendor) } });
+    }
+    if (!dbVendor) {
+      const vMap = await LightspeedEntityMap.findOne({
+        where: { entity_type: 'vendor', lightspeed_id: String(rawDropdownVendor) },
+      });
+      if (vMap) {
+        dbVendor = await Vendor.findByPk(vMap.local_id);
+      }
+    }
+    if (!dbVendor && typeof rawDropdownVendor === 'string') {
+      dbVendor = await Vendor.findOne({ where: { name: rawDropdownVendor.trim() } });
+    }
+
+    if (dbVendor) {
+      const existing = resolvedList.find((r) => r.vendorId === dbVendor!.id);
+      const cost = !isNaN(Number(rawSingleVendorCost)) ? Number(rawSingleVendorCost) : 0;
+      if (existing) {
+        existing.isPrimary = true;
+        if (rawSingleVendorSku !== undefined) existing.vendorSku = String(rawSingleVendorSku).trim();
+        if (cost > 0 && existing.vendorCost === 0) existing.vendorCost = cost;
+      } else {
+        processedVendorIds.add(dbVendor.id);
+        resolvedList.push({
+          vendorId: dbVendor.id,
+          lightspeedVendorId: dbVendor.lightspeed_vendor_id || '0',
+          vendorSku: rawSingleVendorSku ? String(rawSingleVendorSku).trim() : null,
+          vendorCost: cost,
+          isPrimary: true,
+        });
+      }
+    } else if (typeof rawDropdownVendor === 'string' && isNaN(Number(rawDropdownVendor)) && !rawSingleVendorSku) {
+      // If rawDropdownVendor was passed as a code (e.g. "HOLL") and no vendor was found,
+      // it might be the "Vendor ID" SKU text field without a dropdown vendor selected.
+      rawSingleVendorSku = rawDropdownVendor;
+    }
+  }
+
+  // Ensure at least one is primary if any exist
+  if (resolvedList.length > 0 && !resolvedList.some((v) => v.isPrimary)) {
+    resolvedList[0].isPrimary = true;
+  }
+
+  return resolvedList;
 }
 
 /**
@@ -534,10 +755,50 @@ export const createProduct = async (req: Request, res: Response) => {
       lsPayload.displayNote = 'true';
     }
 
+    // Resolve Reorder Point and Reorder Level
+    const rawReorderPoint =
+      req.body.reorder_point !== undefined ? req.body.reorder_point : req.body.reorderPoint;
+    const rawReorderLevel =
+      req.body.reorder_level !== undefined ? req.body.reorder_level : req.body.reorderLevel;
+
+    const resolvedDefaultReorderPoint =
+      rawReorderPoint !== undefined && !isNaN(Number(rawReorderPoint)) ? Number(rawReorderPoint) : 0;
+    const resolvedDefaultReorderLevel =
+      rawReorderLevel !== undefined && !isNaN(Number(rawReorderLevel)) ? Number(rawReorderLevel) : 0;
+
     // Attributes in Lightspeed payload
     if (resolvedAttr1) lsPayload.attribute1 = String(resolvedAttr1);
     if (resolvedAttr2) lsPayload.attribute2 = String(resolvedAttr2);
     if (resolvedAttr3) lsPayload.attribute3 = String(resolvedAttr3);
+
+    // Tags in Lightspeed payload
+    if (resolvedTagNames.length > 0) {
+      lsPayload.Tags = {
+        tag: resolvedTagNames.length === 1 ? resolvedTagNames[0] : resolvedTagNames,
+      };
+    }
+
+    // Resolve Vendors
+    const resolvedVendors = await resolveVendorsFromInput(req.body);
+    const primaryVendor = resolvedVendors.find((v) => v.isPrimary);
+    if (primaryVendor && primaryVendor.lightspeedVendorId !== '0') {
+      lsPayload.defaultVendorID = primaryVendor.lightspeedVendorId;
+    }
+
+    if (resolvedVendors.length > 0) {
+      const vendorNums = resolvedVendors
+        .filter((v) => Boolean(v.vendorSku))
+        .map((v) => ({
+          ...(v.lightspeedVendorId !== '0' ? { vendorID: v.lightspeedVendorId } : {}),
+          value: v.vendorSku!,
+          cost: String(v.vendorCost || 0),
+        }));
+      if (vendorNums.length > 0) {
+        lsPayload.ItemVendorNums = {
+          ItemVendorNum: vendorNums.length === 1 ? vendorNums[0] : vendorNums,
+        };
+      }
+    }
 
     const isReadOnly = await LightspeedService.isReadOnlyMode();
 
@@ -557,6 +818,17 @@ export const createProduct = async (req: Request, res: Response) => {
         };
         console.log('[READ-ONLY] Lightspeed Item QOH UPDATE payload:\n', JSON.stringify(qohPayload, null, 2));
       }
+
+      let itemShopPayload = null;
+      if (rawReorderPoint !== undefined || rawReorderLevel !== undefined) {
+        itemShopPayload = {
+          endpoint: 'PUT /ItemShop/{itemShopID}.json',
+          reorderPoint: String(resolvedDefaultReorderPoint),
+          reorderLevel: String(resolvedDefaultReorderLevel),
+        };
+        console.log('[READ-ONLY] Lightspeed ItemShop UPDATE payload:\n', JSON.stringify(itemShopPayload, null, 2));
+      }
+
       logger.info(
         `[READ-ONLY] Lightspeed Item CREATE payload (not sent): POST /Item.json ${JSON.stringify(lsPayload)}`
       );
@@ -567,6 +839,7 @@ export const createProduct = async (req: Request, res: Response) => {
           message: 'Read-only mode is active. Payload displayed in console (no writes performed to POS or Database).',
           payload: lsPayload,
           ...(qohPayload ? { qohPayload } : {}),
+          ...(itemShopPayload ? { itemShopPayload } : {}),
         },
         200
       );
@@ -710,6 +983,25 @@ export const createProduct = async (req: Request, res: Response) => {
         await ProductTag.bulkCreate(bulkTags, { transaction });
       }
 
+      // Create ProductVendor mappings
+      if (resolvedVendors.length > 0) {
+        for (const rv of resolvedVendors) {
+          await ProductVendor.create(
+            {
+              product_id: product.id,
+              vendor_id: rv.vendorId,
+              lightspeed_item_vendor_num_id: null,
+              vendor_sku: rv.vendorSku || null,
+              vendor_cost: rv.vendorCost || 0,
+              is_primary: rv.isPrimary,
+              lead_time: 0,
+              minimum_order_qty: 0,
+            },
+            { transaction }
+          );
+        }
+      }
+
       // Create ProductInventory records for the item's REAL shops (prevent duplicate product_id + shop_id)
       const insertedShopIds = new Set<number>();
 
@@ -738,14 +1030,56 @@ export const createProduct = async (req: Request, res: Response) => {
           const assignedQoh =
             stockByItemShopId.get(String(shopData.itemShopID)) ?? stockByShopId.get(String(lsShopId)) ?? 0;
 
+          // Determine reorder point & level for this shop
+          const targetItemShopConfig = requestedItemShops?.find(
+            (is: any) =>
+              String(is.shop_id || is.shopId || is.shopID) === String(lsShopId) ||
+              String(is.shop_id || is.shopId || is.shopID) === String(localShopId) ||
+              String(is.item_shop_id || is.itemShopID) === String(shopData.itemShopID)
+          );
+
+          const shopReorderPoint =
+            targetItemShopConfig?.reorder_point !== undefined
+              ? Number(targetItemShopConfig.reorder_point)
+              : (targetItemShopConfig?.reorderPoint !== undefined
+                ? Number(targetItemShopConfig.reorderPoint)
+                : (rawReorderPoint !== undefined ? resolvedDefaultReorderPoint : parseInt(shopData.reorderPoint || '0', 10)));
+
+          const shopReorderLevel =
+            targetItemShopConfig?.reorder_level !== undefined
+              ? Number(targetItemShopConfig.reorder_level)
+              : (targetItemShopConfig?.reorderLevel !== undefined
+                ? Number(targetItemShopConfig.reorderLevel)
+                : (rawReorderLevel !== undefined ? resolvedDefaultReorderLevel : parseInt(shopData.reorderLevel || '0', 10)));
+
+          // Update Lightspeed ItemShop reorder point/level via PUT /ItemShop/{id}.json if specified
+          if (
+            (rawReorderPoint !== undefined || rawReorderLevel !== undefined || targetItemShopConfig) &&
+            shopData.itemShopID
+          ) {
+            try {
+              const itemShopUpdatePayload: Record<string, string> = {
+                reorderPoint: String(shopReorderPoint),
+                reorderLevel: String(shopReorderLevel),
+              };
+              logger.info(
+                `Updating ItemShop ${shopData.itemShopID} in Lightspeed POS with reorder settings:`,
+                itemShopUpdatePayload
+              );
+              await LightspeedService.updateItemShop(shopData.itemShopID.toString(), itemShopUpdatePayload);
+            } catch (shopUpdateErr) {
+              logger.warn(`Failed to update ItemShop ${shopData.itemShopID} reorder settings in Lightspeed:`, shopUpdateErr);
+            }
+          }
+
           await ProductInventory.create(
             {
               product_id: product.id,
               shop_id: localShopId,
               qoh: assignedQoh,
               unit_cost: resolvedCost || 0,
-              reorder_point: parseInt(shopData.reorderPoint || '0', 10),
-              reorder_level: parseInt(shopData.reorderLevel || '0', 10),
+              reorder_point: shopReorderPoint,
+              reorder_level: shopReorderLevel,
               lightspeed_item_shop_id: shopData.itemShopID?.toString() || null,
               total_value: assignedQoh * (resolvedCost || 0),
               reserved: 0,
@@ -771,8 +1105,8 @@ export const createProduct = async (req: Request, res: Response) => {
               shop_id: defaultShop.id,
               qoh: totalInitialQoh,
               unit_cost: resolvedCost || 0,
-              reorder_point: 0,
-              reorder_level: 0,
+              reorder_point: resolvedDefaultReorderPoint,
+              reorder_level: resolvedDefaultReorderLevel,
               lightspeed_item_shop_id: null,
               total_value: totalInitialQoh * (resolvedCost || 0),
               reserved: 0,
@@ -821,7 +1155,10 @@ export const createProduct = async (req: Request, res: Response) => {
           qoh: stockByItemShopId.get(String(s.itemShopID)) ?? 0,
           itemShopID: s.itemShopID,
         })),
-        vendors: [],
+        vendors: resolvedVendors.map((v) => ({
+          vendorID: v.lightspeedVendorId || String(v.vendorId),
+          sku: v.vendorSku,
+        })),
         tags: [...resolvedTagNames].sort(),
         images: [],
       };
@@ -840,7 +1177,27 @@ export const createProduct = async (req: Request, res: Response) => {
 
       await transaction.commit();
 
-      const formatted = await formatProduct(product);
+      const fullProduct = await Product.findByPk(product.id, {
+        include: [
+          { model: Category, as: 'category' },
+          { model: Brand, as: 'brand' },
+          { model: ProductMatrix, as: 'matrix' },
+          { model: Tag, as: 'tags', through: { attributes: [] } },
+          { model: ProductImage, as: 'images' },
+          {
+            model: ProductInventory,
+            as: 'inventories',
+            include: [{ model: Shop, as: 'shop' }],
+          },
+          {
+            model: ProductVendor,
+            as: 'productVendors',
+            include: [{ model: Vendor, as: 'vendor' }],
+          },
+        ],
+      });
+
+      const formatted = await formatProduct(fullProduct || product);
       return res.sendSuccess(
         res,
         { product: formatted, message: 'Product created successfully in Lightspeed and local database.' },
@@ -917,14 +1274,18 @@ export const updateProduct = async (req: Request, res: Response) => {
     let resolvedTagNames: string[] | undefined = undefined;
     let resolvedTagIds: number[] | undefined = undefined;
 
-    if (updates.tag_ids !== undefined && Array.isArray(updates.tag_ids)) {
-      const dbTags = await Tag.findAll({ where: { id: updates.tag_ids } });
+    const rawTagIds = updates.tag_ids !== undefined ? updates.tag_ids : updates.tagIds;
+    const rawTags = updates.tags !== undefined ? updates.tags : updates.Tags;
+
+    if (rawTagIds !== undefined && Array.isArray(rawTagIds)) {
+      const dbTags = await Tag.findAll({ where: { id: rawTagIds } });
       resolvedTagIds = dbTags.map((t) => t.id);
       resolvedTagNames = dbTags.map((t) => t.name.trim());
-    } else if (updates.tags !== undefined && Array.isArray(updates.tags)) {
+    } else if (rawTags !== undefined && Array.isArray(rawTags)) {
       resolvedTagIds = [];
       resolvedTagNames = [];
-      for (const tName of updates.tags) {
+      for (const rawTag of rawTags) {
+        const tName = typeof rawTag === 'object' && rawTag !== null ? (rawTag.name || rawTag.tag) : rawTag;
         if (typeof tName === 'string' && tName.trim() !== '') {
           const trimmed = tName.trim();
           const [tRecord] = await Tag.findOrCreate({
@@ -940,6 +1301,19 @@ export const updateProduct = async (req: Request, res: Response) => {
         }
       }
     }
+
+    // Resolve Reorder Point and Reorder Level
+    const rawReorderPoint =
+      updates.reorder_point !== undefined ? updates.reorder_point : updates.reorderPoint;
+    const rawReorderLevel =
+      updates.reorder_level !== undefined ? updates.reorder_level : updates.reorderLevel;
+    const requestedItemShops = Array.isArray(updates.item_shops)
+      ? updates.item_shops
+      : (Array.isArray(updates.itemShops)
+        ? updates.itemShops
+        : (updates.ItemShops?.ItemShop
+          ? (Array.isArray(updates.ItemShops.ItemShop) ? updates.ItemShops.ItemShop : [updates.ItemShops.ItemShop])
+          : undefined));
 
     const finalPrice = updates.price !== undefined ? updates.price : product.price;
     const finalMsrp = updates.msrp !== undefined ? updates.msrp : product.msrp;
@@ -974,6 +1348,66 @@ export const updateProduct = async (req: Request, res: Response) => {
 
     if (finalTaxClassId) {
       lsPayload.taxClassID = finalTaxClassId;
+    }
+
+    // Tags in Lightspeed payload
+    if (resolvedTagNames !== undefined && resolvedTagNames.length > 0) {
+      lsPayload.Tags = {
+        tag: resolvedTagNames.length === 1 ? resolvedTagNames[0] : resolvedTagNames,
+      };
+    }
+
+    // Resolve Vendors if provided
+    const hasVendorUpdates =
+      updates.vendor !== undefined ||
+      updates.vendor_id !== undefined ||
+      updates.default_vendor_id !== undefined ||
+      updates.defaultVendorID !== undefined ||
+      updates.vendorId !== undefined ||
+      updates.vendor_sku !== undefined ||
+      updates.vendorSku !== undefined ||
+      updates.vendor_code !== undefined ||
+      updates.vendorCode !== undefined ||
+      updates.vendor_item_id !== undefined ||
+      updates.vendorItemId !== undefined ||
+      updates.vendor_item_number !== undefined ||
+      updates.vendorItemNumber !== undefined ||
+      updates.vendor_cost !== undefined ||
+      updates.vendorCost !== undefined ||
+      updates.vendors !== undefined ||
+      updates.product_vendors !== undefined ||
+      updates.productVendors !== undefined ||
+      updates.ItemVendorNums !== undefined;
+
+    let resolvedVendors: ResolvedProductVendor[] | undefined = undefined;
+    if (hasVendorUpdates) {
+      resolvedVendors = await resolveVendorsFromInput(updates);
+      const primaryVendor = resolvedVendors.find((v) => v.isPrimary);
+      if (primaryVendor && primaryVendor.lightspeedVendorId !== '0') {
+        lsPayload.defaultVendorID = primaryVendor.lightspeedVendorId;
+      } else if (
+        updates.vendor_id === null ||
+        updates.default_vendor_id === null ||
+        updates.defaultVendorID === '0' ||
+        updates.defaultVendorID === 0
+      ) {
+        lsPayload.defaultVendorID = '0';
+      }
+
+      if (resolvedVendors.length > 0) {
+        const vendorNums = resolvedVendors
+          .filter((v) => Boolean(v.vendorSku))
+          .map((v) => ({
+            ...(v.lightspeedVendorId !== '0' ? { vendorID: v.lightspeedVendorId } : {}),
+            value: v.vendorSku!,
+            cost: String(v.vendorCost || 0),
+          }));
+        if (vendorNums.length > 0) {
+          lsPayload.ItemVendorNums = {
+            ItemVendorNum: vendorNums.length === 1 ? vendorNums[0] : vendorNums,
+          };
+        }
+      }
     }
 
     const finalCustomSku = updates.custom_sku !== undefined ? updates.custom_sku : product.custom_sku;
@@ -1057,6 +1491,18 @@ export const updateProduct = async (req: Request, res: Response) => {
         `[READ-ONLY] Lightspeed Item UPDATE payload for product ID ${product.lightspeed_item_id}:\n`,
         JSON.stringify(lsPayload, null, 2)
       );
+
+      let itemShopPayload = null;
+      if (rawReorderPoint !== undefined || rawReorderLevel !== undefined || requestedItemShops) {
+        itemShopPayload = {
+          endpoint: 'PUT /ItemShop/{itemShopID}.json',
+          ...(rawReorderPoint !== undefined ? { reorderPoint: String(rawReorderPoint) } : {}),
+          ...(rawReorderLevel !== undefined ? { reorderLevel: String(rawReorderLevel) } : {}),
+          ...(requestedItemShops ? { itemShops: requestedItemShops } : {}),
+        };
+        console.log('[READ-ONLY] Lightspeed ItemShop UPDATE payload:\n', JSON.stringify(itemShopPayload, null, 2));
+      }
+
       logger.info(
         `[READ-ONLY] Lightspeed Item UPDATE payload (not sent): PUT /Item/${product.lightspeed_item_id}.json ${JSON.stringify(lsPayload)}`
       );
@@ -1064,6 +1510,7 @@ export const updateProduct = async (req: Request, res: Response) => {
       return res.sendSuccess(res, {
         message: 'Read-only mode is active. Payload displayed in console (no writes performed to POS or Database).',
         payload: lsPayload,
+        ...(itemShopPayload ? { itemShopPayload } : {}),
       });
     }
 
@@ -1137,6 +1584,124 @@ export const updateProduct = async (req: Request, res: Response) => {
         }
       }
 
+      // Update reorder point and level on ItemShops and ProductInventory if provided
+      if (rawReorderPoint !== undefined || rawReorderLevel !== undefined || requestedItemShops) {
+        const inventories = await ProductInventory.findAll({
+          where: { product_id: product.id },
+          include: [{ model: Shop, as: 'shop' }],
+          transaction,
+        });
+
+        for (const inv of inventories) {
+          const lsShopId = (inv as any).shop?.lightspeed_shop_id;
+          const targetItemShopConfig = requestedItemShops?.find(
+            (is: any) =>
+              String(is.shop_id || is.shopId || is.shopID) === String(inv.shop_id) ||
+              (lsShopId && String(is.shop_id || is.shopId || is.shopID) === String(lsShopId)) ||
+              (inv.lightspeed_item_shop_id && String(is.item_shop_id || is.itemShopID) === String(inv.lightspeed_item_shop_id))
+          );
+
+          const newRepoint =
+            targetItemShopConfig?.reorder_point !== undefined
+              ? Number(targetItemShopConfig.reorder_point)
+              : (targetItemShopConfig?.reorderPoint !== undefined
+                ? Number(targetItemShopConfig.reorderPoint)
+                : (rawReorderPoint !== undefined ? Number(rawReorderPoint) : inv.reorder_point));
+
+          const newRelevel =
+            targetItemShopConfig?.reorder_level !== undefined
+              ? Number(targetItemShopConfig.reorder_level)
+              : (targetItemShopConfig?.reorderLevel !== undefined
+                ? Number(targetItemShopConfig.reorderLevel)
+                : (rawReorderLevel !== undefined ? Number(rawReorderLevel) : inv.reorder_level));
+
+          // Call Lightspeed PUT /ItemShop/{itemShopID}.json if real ID exists
+          if (inv.lightspeed_item_shop_id && !inv.lightspeed_item_shop_id.startsWith('local_')) {
+            try {
+              const itemShopUpdatePayload: Record<string, string> = {};
+              if (rawReorderPoint !== undefined || targetItemShopConfig?.reorder_point !== undefined || targetItemShopConfig?.reorderPoint !== undefined) {
+                itemShopUpdatePayload.reorderPoint = String(newRepoint);
+              }
+              if (rawReorderLevel !== undefined || targetItemShopConfig?.reorder_level !== undefined || targetItemShopConfig?.reorderLevel !== undefined) {
+                itemShopUpdatePayload.reorderLevel = String(newRelevel);
+              }
+              if (Object.keys(itemShopUpdatePayload).length > 0) {
+                await LightspeedService.updateItemShop(inv.lightspeed_item_shop_id, itemShopUpdatePayload);
+                logger.info(`Updated Lightspeed ItemShop ${inv.lightspeed_item_shop_id} with reorder settings:`, itemShopUpdatePayload);
+              }
+            } catch (itemShopErr) {
+              logger.warn(`Failed to update Lightspeed ItemShop ${inv.lightspeed_item_shop_id}:`, itemShopErr);
+            }
+          }
+
+          await inv.update(
+            {
+              reorder_point: newRepoint,
+              reorder_level: newRelevel,
+            },
+            { transaction }
+          );
+        }
+      }
+
+      // Update ProductVendor mappings if vendors were provided
+      if (hasVendorUpdates && resolvedVendors !== undefined) {
+        const currentPVs = await ProductVendor.findAll({
+          where: { product_id: product.id },
+          transaction,
+        });
+
+        const isArrayUpdate =
+          Array.isArray(updates.vendors) ||
+          Array.isArray(updates.product_vendors) ||
+          Array.isArray(updates.productVendors) ||
+          Array.isArray(updates.ItemVendorNums?.ItemVendorNum);
+
+        if (isArrayUpdate) {
+          const activeVendorIds = new Set(resolvedVendors.map((rv) => rv.vendorId));
+          for (const pv of currentPVs) {
+            if (!activeVendorIds.has(pv.vendor_id)) {
+              await pv.destroy({ transaction });
+            }
+          }
+        }
+
+        for (const rv of resolvedVendors) {
+          const existingPV = currentPVs.find((pv) => pv.vendor_id === rv.vendorId);
+          if (existingPV) {
+            await existingPV.update(
+              {
+                vendor_sku: rv.vendorSku !== undefined ? rv.vendorSku : existingPV.vendor_sku,
+                vendor_cost: rv.vendorCost !== undefined ? rv.vendorCost : existingPV.vendor_cost,
+                is_primary: rv.isPrimary,
+              },
+              { transaction }
+            );
+          } else {
+            await ProductVendor.create(
+              {
+                product_id: product.id,
+                vendor_id: rv.vendorId,
+                lightspeed_item_vendor_num_id: null,
+                vendor_sku: rv.vendorSku || null,
+                vendor_cost: rv.vendorCost || 0,
+                is_primary: rv.isPrimary,
+                lead_time: 0,
+                minimum_order_qty: 0,
+              },
+              { transaction }
+            );
+          }
+        }
+
+        if (
+          resolvedVendors.length === 0 &&
+          (updates.vendor_id === null || updates.default_vendor_id === null || updates.defaultVendorID === '0')
+        ) {
+          await ProductVendor.update({ is_primary: false }, { where: { product_id: product.id }, transaction });
+        }
+      }
+
       // Re-hash product for Sync tracking
       const hashPayload = {
         product_matrix_id: product.product_matrix_id,
@@ -1167,7 +1732,13 @@ export const updateProduct = async (req: Request, res: Response) => {
         tax_class_id: product.tax_class_id,
         tax_class_name: product.tax_class_name,
         shops: [],
-        vendors: [],
+        vendors:
+          resolvedVendors !== undefined
+            ? resolvedVendors.map((v) => ({
+                vendorID: v.lightspeedVendorId || String(v.vendorId),
+                sku: v.vendorSku,
+              }))
+            : [],
         tags: resolvedTagNames !== undefined ? [...resolvedTagNames].sort() : [],
         images: [],
       };
@@ -1186,7 +1757,27 @@ export const updateProduct = async (req: Request, res: Response) => {
 
       await transaction.commit();
 
-      const formatted = await formatProduct(product);
+      const fullProduct = await Product.findByPk(product.id, {
+        include: [
+          { model: Category, as: 'category' },
+          { model: Brand, as: 'brand' },
+          { model: ProductMatrix, as: 'matrix' },
+          { model: Tag, as: 'tags', through: { attributes: [] } },
+          { model: ProductImage, as: 'images' },
+          {
+            model: ProductInventory,
+            as: 'inventories',
+            include: [{ model: Shop, as: 'shop' }],
+          },
+          {
+            model: ProductVendor,
+            as: 'productVendors',
+            include: [{ model: Vendor, as: 'vendor' }],
+          },
+        ],
+      });
+
+      const formatted = await formatProduct(fullProduct || product);
       return res.sendSuccess(res, {
         product: formatted,
         message: 'Product updated successfully in Lightspeed and local database.',
