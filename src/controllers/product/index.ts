@@ -60,6 +60,13 @@ async function formatProduct(product: Product, syncInfoMap?: Map<string, any>) {
     systemID: product.system_sku,
     customSKU: product.custom_sku,
     manufacturerSKU: product.manufacturer_sku,
+    Note: product.note
+      ? {
+          note: product.note,
+          isPublic: product.display_note ? 'true' : 'false',
+        }
+      : null,
+    displayNote: product.display_note ? 'true' : 'false',
     createTime: product.createdAt,
     timeStamp: product.updatedAt,
     lightspeed_sync_info: syncInfo,
@@ -328,26 +335,37 @@ export const createProduct = async (req: Request, res: Response) => {
       tags,
     } = req.body;
 
-    if (!description || typeof description !== 'string' || description.trim() === '') {
+    const resolvedDescription = description || req.body.Description;
+    if (!resolvedDescription || typeof resolvedDescription !== 'string' || resolvedDescription.trim() === '') {
       return res.sendError(res, 'Product description is required.');
     }
 
     // Resolve Brand/Category/Matrix IDs on Lightspeed side for logged payload
+    const resolvedBrandId =
+      brand_id !== undefined ? brand_id : (req.body.brandId !== undefined ? req.body.brandId : req.body.manufacturerID);
     let brandLsId = '0';
-    if (brand_id) {
-      const b = await Brand.findByPk(brand_id);
+    if (resolvedBrandId) {
+      const b = await Brand.findByPk(resolvedBrandId);
       if (b) brandLsId = b.lightspeed_brand_id;
     }
 
+    const resolvedCategoryId =
+      category_id !== undefined
+        ? category_id
+        : (req.body.categoryId !== undefined ? req.body.categoryId : req.body.categoryID);
     let categoryLsId = '0';
-    if (category_id) {
-      const c = await Category.findByPk(category_id);
+    if (resolvedCategoryId) {
+      const c = await Category.findByPk(resolvedCategoryId);
       if (c) categoryLsId = c.lightspeed_category_id;
     }
 
+    const resolvedMatrixId =
+      product_matrix_id !== undefined
+        ? product_matrix_id
+        : (req.body.productMatrixId !== undefined ? req.body.productMatrixId : req.body.itemMatrixID);
     let matrixLsId = '0';
-    if (product_matrix_id) {
-      const m = await ProductMatrix.findByPk(product_matrix_id);
+    if (resolvedMatrixId) {
+      const m = await ProductMatrix.findByPk(resolvedMatrixId);
       if (m) matrixLsId = m.lightspeed_matrix_id;
     }
 
@@ -355,12 +373,15 @@ export const createProduct = async (req: Request, res: Response) => {
     let resolvedTagNames: string[] = [];
     let resolvedTagIds: number[] = [];
 
-    if (Array.isArray(tag_ids) && tag_ids.length > 0) {
-      const dbTags = await Tag.findAll({ where: { id: tag_ids } });
+    const rawTagIds = tag_ids || req.body.tagIds;
+    const rawTags = tags || req.body.Tags;
+
+    if (Array.isArray(rawTagIds) && rawTagIds.length > 0) {
+      const dbTags = await Tag.findAll({ where: { id: rawTagIds } });
       resolvedTagIds = dbTags.map((t) => t.id);
       resolvedTagNames = dbTags.map((t) => t.name.trim());
-    } else if (Array.isArray(tags) && tags.length > 0) {
-      for (const tName of tags) {
+    } else if (Array.isArray(rawTags) && rawTags.length > 0) {
+      for (const tName of rawTags) {
         if (typeof tName === 'string' && tName.trim() !== '') {
           const trimmed = tName.trim();
           const [tRecord] = await Tag.findOrCreate({
@@ -377,44 +398,146 @@ export const createProduct = async (req: Request, res: Response) => {
       }
     }
 
-    const resolvedTaxClassId = tax_class_id ? String(tax_class_id) : '0';
+    // Resolve Note and Display Note (supports Note, note, notes, display_note, displayNote, isPublic)
+    const rawNote =
+      note !== undefined ? note : (req.body.Note !== undefined ? req.body.Note : req.body.notes);
 
-    const pricesPayload = [
-      { useType: 'Default', amount: price || 0 },
-      { useType: 'MSRP', amount: msrp || 0 },
-      { useType: 'Online', amount: online_price || 0 },
-    ];
+    let resolvedNote: string | null = null;
+    let resolvedDisplayNote =
+      display_note === true ||
+      display_note === 'true' ||
+      req.body.displayNote === true ||
+      req.body.displayNote === 'true' ||
+      req.body.isPublic === true ||
+      req.body.isPublic === 'true';
+
+    if (typeof rawNote === 'object' && rawNote !== null) {
+      if (rawNote.note !== undefined && rawNote.note !== null) {
+        resolvedNote = String(rawNote.note).trim();
+      }
+      if (rawNote.isPublic !== undefined) {
+        resolvedDisplayNote = rawNote.isPublic === true || rawNote.isPublic === 'true';
+      }
+    } else if (typeof rawNote === 'string') {
+      const trimmed = rawNote.trim();
+      if (trimmed.length > 0) {
+        resolvedNote = trimmed;
+      }
+    }
+
+    // Resolve Attributes
+    const resolvedAttr1 =
+      attribute_1_value !== undefined
+        ? attribute_1_value
+        : (req.body.attribute1 !== undefined ? req.body.attribute1 : req.body.attribute_1);
+    const resolvedAttr2 =
+      attribute_2_value !== undefined
+        ? attribute_2_value
+        : (req.body.attribute2 !== undefined ? req.body.attribute2 : req.body.attribute_2);
+    const resolvedAttr3 =
+      attribute_3_value !== undefined
+        ? attribute_3_value
+        : (req.body.attribute3 !== undefined ? req.body.attribute3 : req.body.attribute_3);
+
+    // Resolve Initial Stock / QOH
+    const rawQoh =
+      req.body.qoh !== undefined
+        ? req.body.qoh
+        : (req.body.initial_stock !== undefined
+          ? req.body.initial_stock
+          : (req.body.quantity !== undefined
+            ? req.body.quantity
+            : (req.body.stock !== undefined ? req.body.stock : undefined)));
+
+    const specifiedShopId = req.body.shop_id || req.body.shopId || req.body.shopID;
+    const requestedItemShops = Array.isArray(req.body.item_shops)
+      ? req.body.item_shops
+      : (Array.isArray(req.body.itemShops)
+        ? req.body.itemShops
+        : (req.body.ItemShops?.ItemShop
+          ? (Array.isArray(req.body.ItemShops.ItemShop) ? req.body.ItemShops.ItemShop : [req.body.ItemShops.ItemShop])
+          : undefined));
+
+    let totalInitialQoh = 0;
+    if (requestedItemShops && requestedItemShops.length > 0) {
+      for (const is of requestedItemShops) {
+        const q = Number(is.qoh !== undefined ? is.qoh : (is.quantity !== undefined ? is.quantity : is.stock));
+        if (!isNaN(q) && q > 0) {
+          totalInitialQoh += q;
+        }
+      }
+    } else if (rawQoh !== undefined) {
+      const parsedQoh = Number(rawQoh);
+      if (!isNaN(parsedQoh) && parsedQoh > 0) {
+        totalInitialQoh = parsedQoh;
+      }
+    }
+
+    const resolvedTaxClassId = tax_class_id
+      ? String(tax_class_id)
+      : (req.body.taxClassID ? String(req.body.taxClassID) : '0');
+    const resolvedPrice = price !== undefined ? price : (req.body.Price !== undefined ? req.body.Price : 0);
+    const resolvedMsrp =
+      msrp !== undefined
+        ? msrp
+        : (req.body.Msrp !== undefined ? req.body.Msrp : (req.body.MSRP !== undefined ? req.body.MSRP : 0));
+    const resolvedOnlinePrice =
+      online_price !== undefined ? online_price : (req.body.onlinePrice !== undefined ? req.body.onlinePrice : 0);
+    const resolvedCost =
+      default_cost !== undefined
+        ? default_cost
+        : (req.body.defaultCost !== undefined ? req.body.defaultCost : (req.body.cost !== undefined ? req.body.cost : 0));
 
     const lsPayload: any = {
-      description: description.trim(),
-      systemSku: system_sku || null,
-      customSku: custom_sku || null,
-      upc: upc || null,
-      ean: ean || null,
-      manufacturerSku: manufacturer_sku || null,
-      defaultCost: default_cost || 0,
+      description: resolvedDescription.trim(),
+      defaultCost: String(resolvedCost !== undefined && resolvedCost !== null ? resolvedCost : 0),
       discountable: discountable !== false ? 'true' : 'false',
       tax: taxable !== false ? 'true' : 'false',
-      publishToEcom: publish_to_ecom !== false ? 'true' : 'false',
+      itemType: item_type || req.body.itemType || 'default',
       serialized: serialized ? 'true' : 'false',
-      attribute1: attribute_1_value || null,
-      attribute2: attribute_2_value || null,
-      attribute3: attribute_3_value || null,
-      note: note || null,
-      displayNote: display_note ? 'true' : 'false',
-      Prices: { ItemPrice: pricesPayload },
+      publishToEcom: publish_to_ecom !== false ? 'true' : 'false',
+      Prices: {
+        ItemPrice: [
+          { amount: String(resolvedPrice || 0), useTypeID: '1', useType: 'Default' },
+          { amount: String(resolvedMsrp || 0), useTypeID: '2', useType: 'MSRP' },
+          { amount: String(resolvedOnlinePrice || 0), useTypeID: '3', useType: 'Online' },
+        ],
+      },
       manufacturerID: brandLsId,
       categoryID: categoryLsId,
       itemMatrixID: matrixLsId,
     };
 
-    if (tax_class_id) {
+    if (resolvedTaxClassId !== '0') {
       lsPayload.taxClassID = resolvedTaxClassId;
     }
+    const resolvedCustomSku = custom_sku || req.body.customSku;
+    const resolvedManufacturerSku = manufacturer_sku || req.body.manufacturerSku;
+    const resolvedUpc = upc || req.body.Upc;
+    const resolvedEan = ean || req.body.Ean;
+    const resolvedSystemSkuInput = system_sku || req.body.systemSku;
 
-    if (resolvedTagNames.length > 0) {
-      lsPayload.Tags = { tag: resolvedTagNames };
+    if (resolvedCustomSku) lsPayload.customSku = String(resolvedCustomSku);
+    if (resolvedManufacturerSku) lsPayload.manufacturerSku = String(resolvedManufacturerSku);
+    if (resolvedUpc) lsPayload.upc = String(resolvedUpc);
+    if (resolvedEan) lsPayload.ean = String(resolvedEan);
+
+    // Note and Display Note in Lightspeed payload
+    if (resolvedNote) {
+      lsPayload.note = resolvedNote;
+      lsPayload.displayNote = resolvedDisplayNote ? 'true' : 'false';
+      lsPayload.Note = {
+        note: resolvedNote,
+        isPublic: resolvedDisplayNote ? 'true' : 'false',
+      };
+    } else if (resolvedDisplayNote) {
+      lsPayload.displayNote = 'true';
     }
+
+    // Attributes in Lightspeed payload
+    if (resolvedAttr1) lsPayload.attribute1 = String(resolvedAttr1);
+    if (resolvedAttr2) lsPayload.attribute2 = String(resolvedAttr2);
+    if (resolvedAttr3) lsPayload.attribute3 = String(resolvedAttr3);
 
     const isReadOnly = await LightspeedService.isReadOnlyMode();
 
@@ -422,6 +545,18 @@ export const createProduct = async (req: Request, res: Response) => {
     // If READ Only flag is true, only show the payload in console and do not write to POS or DB.
     if (isReadOnly) {
       console.log('[READ-ONLY] Lightspeed Item CREATE payload:\n', JSON.stringify(lsPayload, null, 2));
+      let qohPayload = null;
+      if (totalInitialQoh > 0) {
+        qohPayload = {
+          ItemShops: {
+            ItemShop: {
+              itemShopID: 'placeholder_item_shop_id',
+              qoh: totalInitialQoh,
+            },
+          },
+        };
+        console.log('[READ-ONLY] Lightspeed Item QOH UPDATE payload:\n', JSON.stringify(qohPayload, null, 2));
+      }
       logger.info(
         `[READ-ONLY] Lightspeed Item CREATE payload (not sent): POST /Item.json ${JSON.stringify(lsPayload)}`
       );
@@ -431,6 +566,7 @@ export const createProduct = async (req: Request, res: Response) => {
         {
           message: 'Read-only mode is active. Payload displayed in console (no writes performed to POS or Database).',
           payload: lsPayload,
+          ...(qohPayload ? { qohPayload } : {}),
         },
         200
       );
@@ -447,7 +583,86 @@ export const createProduct = async (req: Request, res: Response) => {
     }
 
     const lightspeedItemId = lsItem.itemID.toString();
-    const resolvedSystemSku = lsItem.systemSku ? lsItem.systemSku.toString() : (system_sku || null);
+    const resolvedSystemSku = lsItem.systemSku ? lsItem.systemSku.toString() : (resolvedSystemSkuInput || null);
+
+    // Retrieve ItemShops relation from Lightspeed (or fetch via GET if not present in create response)
+    let lsItemShops: any[] =
+      lsItem.ItemShops && lsItem.ItemShops.ItemShop ? LightspeedService.extractList<any>(lsItem.ItemShops, 'ItemShop') : [];
+
+    if (lsItemShops.length === 0) {
+      try {
+        const itemDetail = await LightspeedService.getItem(lightspeedItemId, 'load_relations=["ItemShops"]');
+        const detailList = LightspeedService.extractList<any>(itemDetail, 'Item');
+        const detailedItem = detailList[0] || itemDetail.Item || itemDetail;
+        if (detailedItem?.ItemShops?.ItemShop) {
+          lsItemShops = LightspeedService.extractList<any>(detailedItem.ItemShops, 'ItemShop');
+        }
+      } catch (shopErr) {
+        logger.warn(`Could not load ItemShops for newly created Item ${lightspeedItemId}:`, shopErr);
+      }
+    }
+
+    // Filter out virtual summary shop (shopID: "0").
+    // In Lightspeed Retail, shopID "0" is a read-only aggregate pseudo-shop across all stores.
+    // Lightspeed explicitly rejects updating QOH on shopID 0, and local DB only maps real shops.
+    const realItemShops = lsItemShops.filter(
+      (s: any) => s && s.shopID !== undefined && s.shopID !== null && String(s.shopID) !== '0'
+    );
+
+    // Apply Option 1: Update initial QOH on Lightspeed via PUT /Item/{itemID}.json
+    const qohUpdates: Array<{ itemShopID: string | number; qoh: number }> = [];
+    const stockByItemShopId = new Map<string, number>();
+    const stockByShopId = new Map<string, number>();
+
+    if (totalInitialQoh > 0 && realItemShops.length > 0) {
+      if (requestedItemShops && requestedItemShops.length > 0) {
+        for (const reqShop of requestedItemShops) {
+          const q = Number(
+            reqShop.qoh !== undefined ? reqShop.qoh : (reqShop.quantity !== undefined ? reqShop.quantity : reqShop.stock)
+          );
+          if (!isNaN(q) && q > 0) {
+            const match = realItemShops.find(
+              (s: any) =>
+                (reqShop.itemShopID && String(s.itemShopID) === String(reqShop.itemShopID)) ||
+                (reqShop.shopID && String(s.shopID) === String(reqShop.shopID)) ||
+                (reqShop.shop_id && String(s.shopID) === String(reqShop.shop_id))
+            );
+            if (match) {
+              qohUpdates.push({ itemShopID: match.itemShopID, qoh: q });
+              stockByItemShopId.set(String(match.itemShopID), q);
+              stockByShopId.set(String(match.shopID), q);
+            }
+          }
+        }
+      } else {
+        // Single initialQoh: assign to requested shop or default to first real shop in realItemShops
+        let targetShop = realItemShops[0];
+        if (specifiedShopId) {
+          const dbShop = await Shop.findByPk(specifiedShopId);
+          const targetLsShopId = dbShop ? dbShop.lightspeed_shop_id : String(specifiedShopId);
+          const found = realItemShops.find((s: any) => String(s.shopID) === targetLsShopId);
+          if (found) targetShop = found;
+        }
+
+        if (targetShop) {
+          qohUpdates.push({ itemShopID: targetShop.itemShopID, qoh: totalInitialQoh });
+          stockByItemShopId.set(String(targetShop.itemShopID), totalInitialQoh);
+          stockByShopId.set(String(targetShop.shopID), totalInitialQoh);
+        }
+      }
+
+      if (qohUpdates.length > 0) {
+        try {
+          logger.info(`Pushing initial QOH to Lightspeed for Item ${lightspeedItemId}:`, qohUpdates);
+          await LightspeedService.updateItemQOH(
+            lightspeedItemId,
+            qohUpdates.length === 1 ? qohUpdates[0] : qohUpdates
+          );
+        } catch (qohErr) {
+          logger.error(`Failed to update initial QOH on Lightspeed for Item ${lightspeedItemId}:`, qohErr);
+        }
+      }
+    }
 
     const transaction = await sequelize.transaction();
 
@@ -455,33 +670,33 @@ export const createProduct = async (req: Request, res: Response) => {
       const product = await Product.create(
         {
           lightspeed_item_id: lightspeedItemId,
-          description: description.trim(),
+          description: resolvedDescription.trim(),
           system_sku: resolvedSystemSku,
-          custom_sku: custom_sku || null,
-          upc: upc || null,
-          ean: ean || null,
-          manufacturer_sku: manufacturer_sku || null,
-          price: price || 0,
-          msrp: msrp || 0,
-          online_price: online_price || 0,
-          default_cost: default_cost || 0,
-          brand_id: brand_id || null,
-          category_id: category_id || null,
-          product_matrix_id: product_matrix_id || null,
+          custom_sku: resolvedCustomSku || null,
+          upc: resolvedUpc || null,
+          ean: resolvedEan || null,
+          manufacturer_sku: resolvedManufacturerSku || null,
+          price: resolvedPrice || 0,
+          msrp: resolvedMsrp || 0,
+          online_price: resolvedOnlinePrice || 0,
+          default_cost: resolvedCost || 0,
+          brand_id: resolvedBrandId || null,
+          category_id: resolvedCategoryId || null,
+          product_matrix_id: resolvedMatrixId || null,
           discountable: discountable !== false,
           taxable: taxable !== false,
-          item_type: item_type || 'Item',
+          item_type: item_type || req.body.itemType || 'Item',
           publish_to_ecom: publish_to_ecom !== false,
           serialized: !!serialized,
-          attribute_1_value: attribute_1_value || null,
-          attribute_2_value: attribute_2_value || null,
-          attribute_3_value: attribute_3_value || null,
-          note: note || null,
-          display_note: !!display_note,
+          attribute_1_value: resolvedAttr1 ? String(resolvedAttr1) : null,
+          attribute_2_value: resolvedAttr2 ? String(resolvedAttr2) : null,
+          attribute_3_value: resolvedAttr3 ? String(resolvedAttr3) : null,
+          note: resolvedNote || null,
+          display_note: !!resolvedDisplayNote,
           archived: false,
-          tax_class_id: tax_class_id ? String(tax_class_id) : null,
+          tax_class_id: resolvedTaxClassId !== '0' ? resolvedTaxClassId : null,
           tax_class_name: tax_class_name || null,
-          qoh: 0,
+          qoh: totalInitialQoh,
         },
         { transaction }
       );
@@ -493,6 +708,83 @@ export const createProduct = async (req: Request, res: Response) => {
           tag_id: tId,
         }));
         await ProductTag.bulkCreate(bulkTags, { transaction });
+      }
+
+      // Create ProductInventory records for the item's REAL shops (prevent duplicate product_id + shop_id)
+      const insertedShopIds = new Set<number>();
+
+      if (realItemShops.length > 0) {
+        for (const shopData of realItemShops) {
+          const lsShopId = shopData.shopID?.toString();
+          const dbShop = await Shop.findOne({ where: { lightspeed_shop_id: lsShopId } });
+          let localShopId = dbShop ? dbShop.id : null;
+
+          if (!localShopId) {
+            const shopMap = await LightspeedEntityMap.findOne({
+              where: { entity_type: 'shop', lightspeed_id: lsShopId },
+              transaction,
+            });
+            if (shopMap) {
+              localShopId = shopMap.local_id;
+            }
+          }
+
+          // If no local shop found or this localShopId is already created, skip to satisfy unique constraint
+          if (!localShopId || insertedShopIds.has(localShopId)) {
+            continue;
+          }
+          insertedShopIds.add(localShopId);
+
+          const assignedQoh =
+            stockByItemShopId.get(String(shopData.itemShopID)) ?? stockByShopId.get(String(lsShopId)) ?? 0;
+
+          await ProductInventory.create(
+            {
+              product_id: product.id,
+              shop_id: localShopId,
+              qoh: assignedQoh,
+              unit_cost: resolvedCost || 0,
+              reorder_point: parseInt(shopData.reorderPoint || '0', 10),
+              reorder_level: parseInt(shopData.reorderLevel || '0', 10),
+              lightspeed_item_shop_id: shopData.itemShopID?.toString() || null,
+              total_value: assignedQoh * (resolvedCost || 0),
+              reserved: 0,
+              layaway: 0,
+              special_order: 0,
+              workorder: 0,
+              total_sale_value: assignedQoh * (resolvedPrice || 0),
+              sellable: assignedQoh,
+            },
+            { transaction }
+          );
+        }
+      }
+
+      // Fallback: If no real ItemShops created, create a single record for default shop if not already inserted
+      if (insertedShopIds.size === 0) {
+        const defaultShop = await Shop.findOne();
+        if (defaultShop && !insertedShopIds.has(defaultShop.id)) {
+          insertedShopIds.add(defaultShop.id);
+          await ProductInventory.create(
+            {
+              product_id: product.id,
+              shop_id: defaultShop.id,
+              qoh: totalInitialQoh,
+              unit_cost: resolvedCost || 0,
+              reorder_point: 0,
+              reorder_level: 0,
+              lightspeed_item_shop_id: null,
+              total_value: totalInitialQoh * (resolvedCost || 0),
+              reserved: 0,
+              layaway: 0,
+              special_order: 0,
+              workorder: 0,
+              total_sale_value: totalInitialQoh * (resolvedPrice || 0),
+              sellable: totalInitialQoh,
+            },
+            { transaction }
+          );
+        }
       }
 
       // Create mapping in Entity Map with initial hash
@@ -524,7 +816,11 @@ export const createProduct = async (req: Request, res: Response) => {
         archived: product.archived,
         tax_class_id: product.tax_class_id,
         tax_class_name: product.tax_class_name,
-        shops: [],
+        shops: realItemShops.map((s) => ({
+          shopID: s.shopID,
+          qoh: stockByItemShopId.get(String(s.itemShopID)) ?? 0,
+          itemShopID: s.itemShopID,
+        })),
         vendors: [],
         tags: [...resolvedTagNames].sort(),
         images: [],
@@ -645,36 +941,32 @@ export const updateProduct = async (req: Request, res: Response) => {
       }
     }
 
-    const pricesPayload = [
-      { useType: 'Default', amount: updates.price !== undefined ? updates.price : product.price },
-      { useType: 'MSRP', amount: updates.msrp !== undefined ? updates.msrp : product.msrp },
-      { useType: 'Online', amount: updates.online_price !== undefined ? updates.online_price : product.online_price },
-    ];
+    const finalPrice = updates.price !== undefined ? updates.price : product.price;
+    const finalMsrp = updates.msrp !== undefined ? updates.msrp : product.msrp;
+    const finalOnlinePrice = updates.online_price !== undefined ? updates.online_price : product.online_price;
+    const finalCost = updates.default_cost !== undefined ? updates.default_cost : product.default_cost;
+    const finalDiscountable = updates.discountable !== undefined ? updates.discountable : product.discountable;
+    const finalTaxable = updates.taxable !== undefined ? updates.taxable : product.taxable;
+    const finalPublishToEcom =
+      updates.publish_to_ecom !== undefined ? updates.publish_to_ecom : product.publish_to_ecom;
+    const finalSerialized = updates.serialized !== undefined ? updates.serialized : product.serialized;
+    const finalItemType = updates.item_type !== undefined ? updates.item_type : product.item_type;
 
     const lsPayload: any = {
       description: finalDescription,
-      systemSku: updates.system_sku !== undefined ? updates.system_sku : product.system_sku,
-      customSku: updates.custom_sku !== undefined ? updates.custom_sku : product.custom_sku,
-      upc: updates.upc !== undefined ? updates.upc : product.upc,
-      ean: updates.ean !== undefined ? updates.ean : product.ean,
-      manufacturerSku: updates.manufacturer_sku !== undefined ? updates.manufacturer_sku : product.manufacturer_sku,
-      defaultCost: updates.default_cost !== undefined ? updates.default_cost : product.default_cost,
-      discountable: (updates.discountable !== undefined ? updates.discountable : product.discountable)
-        ? 'true'
-        : 'false',
-      tax: (updates.taxable !== undefined ? updates.taxable : product.taxable) ? 'true' : 'false',
-      publishToEcom: (updates.publish_to_ecom !== undefined ? updates.publish_to_ecom : product.publish_to_ecom)
-        ? 'true'
-        : 'false',
-      serialized: (updates.serialized !== undefined ? updates.serialized : product.serialized) ? 'true' : 'false',
-      attribute1: updates.attribute_1_value !== undefined ? updates.attribute_1_value : product.attribute_1_value,
-      attribute2: updates.attribute_2_value !== undefined ? updates.attribute_2_value : product.attribute_2_value,
-      attribute3: updates.attribute_3_value !== undefined ? updates.attribute_3_value : product.attribute_3_value,
-      note: updates.note !== undefined ? updates.note : product.note,
-      displayNote: (updates.display_note !== undefined ? updates.display_note : product.display_note)
-        ? 'true'
-        : 'false',
-      Prices: { ItemPrice: pricesPayload },
+      defaultCost: String(finalCost !== undefined && finalCost !== null ? finalCost : 0),
+      discountable: finalDiscountable ? 'true' : 'false',
+      tax: finalTaxable ? 'true' : 'false',
+      itemType: finalItemType || 'default',
+      serialized: finalSerialized ? 'true' : 'false',
+      publishToEcom: finalPublishToEcom ? 'true' : 'false',
+      Prices: {
+        ItemPrice: [
+          { amount: String(finalPrice || 0), useTypeID: '1', useType: 'Default' },
+          { amount: String(finalMsrp || 0), useTypeID: '2', useType: 'MSRP' },
+          { amount: String(finalOnlinePrice || 0), useTypeID: '3', useType: 'Online' },
+        ],
+      },
       manufacturerID: brandLsId,
       categoryID: categoryLsId,
       itemMatrixID: matrixLsId,
@@ -684,9 +976,77 @@ export const updateProduct = async (req: Request, res: Response) => {
       lsPayload.taxClassID = finalTaxClassId;
     }
 
-    if (resolvedTagNames !== undefined) {
-      lsPayload.Tags = resolvedTagNames.length > 0 ? { tag: resolvedTagNames } : '';
+    const finalCustomSku = updates.custom_sku !== undefined ? updates.custom_sku : product.custom_sku;
+    const finalManufacturerSku =
+      updates.manufacturer_sku !== undefined ? updates.manufacturer_sku : product.manufacturer_sku;
+    const finalUpc = updates.upc !== undefined ? updates.upc : product.upc;
+    const finalEan = updates.ean !== undefined ? updates.ean : product.ean;
+
+    // Resolve Note update
+    const rawNoteUpdate =
+      updates.note !== undefined ? updates.note : (updates.Note !== undefined ? updates.Note : updates.notes);
+
+    let finalNote = product.note;
+    let finalDisplayNote = product.display_note;
+
+    if (rawNoteUpdate !== undefined) {
+      if (typeof rawNoteUpdate === 'object' && rawNoteUpdate !== null) {
+        if (rawNoteUpdate.note !== undefined) {
+          finalNote = rawNoteUpdate.note ? String(rawNoteUpdate.note).trim() : null;
+        }
+        if (rawNoteUpdate.isPublic !== undefined) {
+          finalDisplayNote = rawNoteUpdate.isPublic === true || rawNoteUpdate.isPublic === 'true';
+        }
+      } else if (typeof rawNoteUpdate === 'string') {
+        finalNote = rawNoteUpdate.trim() || null;
+      } else if (rawNoteUpdate === null) {
+        finalNote = null;
+      }
     }
+
+    if (updates.display_note !== undefined || updates.displayNote !== undefined || updates.isPublic !== undefined) {
+      const d =
+        updates.display_note !== undefined
+          ? updates.display_note
+          : (updates.displayNote !== undefined ? updates.displayNote : updates.isPublic);
+      finalDisplayNote = d === true || d === 'true';
+    }
+
+    if (finalCustomSku) lsPayload.customSku = String(finalCustomSku);
+    if (finalManufacturerSku) lsPayload.manufacturerSku = String(finalManufacturerSku);
+    if (finalUpc) lsPayload.upc = String(finalUpc);
+    if (finalEan) lsPayload.ean = String(finalEan);
+
+    if (finalNote !== undefined) {
+      lsPayload.note = finalNote || '';
+      lsPayload.displayNote = finalDisplayNote ? 'true' : 'false';
+      if (finalNote) {
+        lsPayload.Note = {
+          note: finalNote,
+          isPublic: finalDisplayNote ? 'true' : 'false',
+        };
+      }
+    } else if (finalDisplayNote !== undefined) {
+      lsPayload.displayNote = finalDisplayNote ? 'true' : 'false';
+    }
+
+    // Resolve Attributes update
+    const finalAttr1 =
+      updates.attribute_1_value !== undefined
+        ? updates.attribute_1_value
+        : (updates.attribute1 !== undefined ? updates.attribute1 : product.attribute_1_value);
+    const finalAttr2 =
+      updates.attribute_2_value !== undefined
+        ? updates.attribute_2_value
+        : (updates.attribute2 !== undefined ? updates.attribute2 : product.attribute_2_value);
+    const finalAttr3 =
+      updates.attribute_3_value !== undefined
+        ? updates.attribute_3_value
+        : (updates.attribute3 !== undefined ? updates.attribute3 : product.attribute_3_value);
+
+    if (finalAttr1) lsPayload.attribute1 = String(finalAttr1);
+    if (finalAttr2) lsPayload.attribute2 = String(finalAttr2);
+    if (finalAttr3) lsPayload.attribute3 = String(finalAttr3);
 
     const isReadOnly = await LightspeedService.isReadOnlyMode();
 
@@ -753,14 +1113,11 @@ export const updateProduct = async (req: Request, res: Response) => {
           item_type: updates.item_type !== undefined ? updates.item_type : product.item_type,
           publish_to_ecom: updates.publish_to_ecom !== undefined ? !!updates.publish_to_ecom : product.publish_to_ecom,
           serialized: updates.serialized !== undefined ? !!updates.serialized : product.serialized,
-          attribute_1_value:
-            updates.attribute_1_value !== undefined ? updates.attribute_1_value : product.attribute_1_value,
-          attribute_2_value:
-            updates.attribute_2_value !== undefined ? updates.attribute_2_value : product.attribute_2_value,
-          attribute_3_value:
-            updates.attribute_3_value !== undefined ? updates.attribute_3_value : product.attribute_3_value,
-          note: updates.note !== undefined ? updates.note : product.note,
-          display_note: updates.display_note !== undefined ? !!updates.display_note : product.display_note,
+          attribute_1_value: finalAttr1 ? String(finalAttr1) : null,
+          attribute_2_value: finalAttr2 ? String(finalAttr2) : null,
+          attribute_3_value: finalAttr3 ? String(finalAttr3) : null,
+          note: finalNote !== undefined ? finalNote : product.note,
+          display_note: !!finalDisplayNote,
           archived: updates.archived !== undefined ? !!updates.archived : product.archived,
           tax_class_id: finalTaxClassId,
           tax_class_name: finalTaxClassName,
@@ -1035,6 +1392,132 @@ export const uploadProductImages = async (req: Request, res: Response) => {
     return res.sendSuccess(res, {
       images: imagesCreated,
       message: 'Product images uploaded successfully to Lightspeed and local database.',
+    });
+  } catch (error: any) {
+    logger.error(error);
+    return res.sendError(res, error.message || 'ERR_INTERNAL_SERVER_ERROR');
+  }
+};
+
+// ---------------------------------------------------------------------------
+// 7. DELETE /product/:id/images/:imageId — Delete image for product
+// ---------------------------------------------------------------------------
+export const deleteProductImage = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    if (isNaN(id)) {
+      return res.sendError(res, 'Invalid product ID.');
+    }
+
+    const imageIdParam = req.params.imageId || (req.params as any).image_id;
+    if (!imageIdParam) {
+      return res.sendError(res, 'Image ID is required.');
+    }
+
+    const product = await Product.findByPk(id);
+    if (!product) {
+      return res.sendError(res, 'Product not found.');
+    }
+
+    // Find image by local ID or lightspeed_image_id, scoped to this product
+    const isNumeric = !isNaN(Number(imageIdParam));
+    const imageWhere: any = {
+      product_id: product.id,
+      ...(isNumeric
+        ? {
+            [Op.or]: [
+              { id: Number(imageIdParam) },
+              { lightspeed_image_id: String(imageIdParam) },
+            ],
+          }
+        : { lightspeed_image_id: String(imageIdParam) }),
+    };
+
+    const image = await ProductImage.findOne({ where: imageWhere });
+    if (!image) {
+      return res.sendError(res, 'Product image not found.');
+    }
+
+    const isReadOnly = await LightspeedService.isReadOnlyMode();
+
+    // ─── READ-ONLY BRANCH ──────────────────────────────────────────────────
+    if (isReadOnly) {
+      const payload = {
+        productID: product.lightspeed_item_id,
+        imageID: image.lightspeed_image_id || image.id,
+        filename: image.filename,
+        endpoint: image.lightspeed_image_id
+          ? `DELETE /Image/${image.lightspeed_image_id}.json`
+          : 'Local database only',
+      };
+      console.log(
+        `[READ-ONLY] Lightspeed Image DELETE payload for product ID ${product.lightspeed_item_id}:\n`,
+        JSON.stringify(payload, null, 2)
+      );
+      logger.info(
+        `[READ-ONLY] Lightspeed Image DELETE payload (not sent): DELETE /Image/${image.lightspeed_image_id || image.id}.json`
+      );
+
+      return res.sendSuccess(res, {
+        message:
+          'Read-only mode is active. Image delete payload displayed in console (no writes performed to POS or Database).',
+        payload,
+      });
+    }
+
+    // ─── WRITE ACCESS BRANCH ───────────────────────────────────────────────
+    // Delete from Lightspeed POS if image has a valid Lightspeed ID
+    if (image.lightspeed_image_id && !image.lightspeed_image_id.startsWith('local_')) {
+      try {
+        logger.info(
+          `Deleting image ${image.lightspeed_image_id} from Lightspeed POS for product ${product.lightspeed_item_id}...`
+        );
+        await LightspeedService.deleteItemImage(
+          image.lightspeed_image_id,
+          product.lightspeed_item_id && !product.lightspeed_item_id.startsWith('local_')
+            ? product.lightspeed_item_id
+            : undefined
+        );
+      } catch (lsErr: any) {
+        logger.error(
+          `Failed to delete image ${image.lightspeed_image_id} from Lightspeed POS:`,
+          lsErr
+        );
+      }
+    }
+
+    // Attempt to delete local file from disk if present
+    if (image.local_path) {
+      try {
+        const filename = path.basename(image.local_path);
+        const uploadsDir = path.join(__dirname, '../../../uploads');
+        const diskPath = path.join(uploadsDir, filename);
+        if (fs.existsSync(diskPath)) {
+          fs.unlinkSync(diskPath);
+        }
+      } catch (fileErr) {
+        logger.warn(`Could not remove local image file for image ${image.id}:`, fileErr);
+      }
+    }
+
+    const wasFeatured = image.is_featured;
+    await image.destroy();
+
+    // If the deleted image was featured, promote the first remaining image to featured
+    if (wasFeatured) {
+      const nextImg = await ProductImage.findOne({
+        where: { product_id: product.id },
+        order: [['id', 'ASC']],
+      });
+      if (nextImg) {
+        await nextImg.update({ is_featured: true });
+      }
+    }
+
+    return res.sendSuccess(res, {
+      message: 'Product image deleted successfully from Lightspeed and local database.',
+      deletedImageId: image.id,
+      lightspeedImageId: image.lightspeed_image_id,
     });
   } catch (error: any) {
     logger.error(error);
@@ -1899,6 +2382,7 @@ export default {
   updateProduct,
   deleteProduct,
   uploadProductImages,
+  deleteProductImage,
   uploadProductsCSV,
   searchProducts,
 };

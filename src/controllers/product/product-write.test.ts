@@ -35,6 +35,7 @@ import {
   updateProduct,
   deleteProduct,
   uploadProductImages,
+  deleteProductImage,
 } from './index';
 import {
   Product,
@@ -76,6 +77,7 @@ describe('Product Write Controllers', () => {
     ProductMatrix.findByPk = jest.fn();
     ProductImage.count = jest.fn();
     ProductImage.create = jest.fn();
+    ProductImage.findOne = jest.fn();
     ProductImage.destroy = jest.fn();
     ProductInventory.create = jest.fn();
     ProductInventory.findOne = jest.fn();
@@ -250,7 +252,7 @@ describe('Product Write Controllers', () => {
       expect(LightspeedService.createProduct).toHaveBeenCalledWith(
         expect.objectContaining({
           taxClassID: '1',
-          Tags: { tag: ['Outdoor', 'Perennial'] },
+          description: 'Rose Bush',
         })
       );
       expect(ProductTag.bulkCreate).toHaveBeenCalledWith(
@@ -258,6 +260,87 @@ describe('Product Write Controllers', () => {
           { product_id: 20, tag_id: 101 },
           { product_id: 20, tag_id: 102 },
         ],
+        expect.any(Object)
+      );
+    });
+
+    it('should push initial stock to Lightspeed via updateItemQOH and persist in Product and ProductInventory', async () => {
+      mockRequest.body = {
+        description: 'Fern Plant',
+        price: 25.0,
+        qoh: 30,
+        Note: 'Handle with care',
+        displayNote: true,
+      };
+
+      (LightspeedService.isReadOnlyMode as jest.Mock).mockResolvedValue(false);
+      (LightspeedService.createProduct as jest.Mock).mockResolvedValue({
+        Item: {
+          itemID: '555',
+          systemSku: '210000000555',
+          description: 'Fern Plant',
+          ItemShops: {
+            ItemShop: [
+              { itemShopID: '15', shopID: '0', qoh: '0' },
+              { itemShopID: '777', shopID: '1', qoh: '0' },
+            ],
+          },
+        },
+      });
+      (LightspeedService.extractList as jest.Mock).mockImplementation((obj, key) => {
+        if (key === 'Item') return [obj.Item || obj];
+        if (key === 'ItemShop') return Array.isArray(obj.ItemShop) ? obj.ItemShop : [obj.ItemShop];
+        return [];
+      });
+      (LightspeedService.updateItemQOH as jest.Mock) = jest.fn().mockResolvedValue({});
+      (Shop.findOne as jest.Mock).mockResolvedValue({ id: 1, lightspeed_shop_id: '1' });
+      (LightspeedService.calculateHash as jest.Mock).mockReturnValue('mockfernproducthash');
+
+      const mockCreated = {
+        id: 30,
+        lightspeed_item_id: '555',
+        description: 'Fern Plant',
+        price: 25.0,
+        qoh: 30,
+        note: 'Handle with care',
+        display_note: true,
+        toJSON: () => ({ id: 30, lightspeed_item_id: '555', description: 'Fern Plant' }),
+      };
+      (Product.create as jest.Mock).mockResolvedValue(mockCreated);
+
+      await createProduct(mockRequest as Request, mockResponse as Response);
+
+      expect(LightspeedService.createProduct).toHaveBeenCalledWith(
+        expect.objectContaining({
+          description: 'Fern Plant',
+          note: 'Handle with care',
+          displayNote: 'true',
+          Note: {
+            note: 'Handle with care',
+            isPublic: 'true',
+          },
+        })
+      );
+      expect(LightspeedService.updateItemQOH).toHaveBeenCalledWith(
+        '555',
+        expect.objectContaining({ itemShopID: '777', qoh: 30 })
+      );
+      expect(Product.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          description: 'Fern Plant',
+          note: 'Handle with care',
+          display_note: true,
+          qoh: 30,
+        }),
+        expect.any(Object)
+      );
+      expect(ProductInventory.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          product_id: 30,
+          shop_id: 1,
+          qoh: 30,
+          lightspeed_item_shop_id: '777',
+        }),
         expect.any(Object)
       );
     });
@@ -437,7 +520,6 @@ describe('Product Write Controllers', () => {
         '401',
         expect.objectContaining({
           taxClassID: '2',
-          Tags: { tag: ['Indoor'] },
         })
       );
       expect(mockProduct.update).toHaveBeenCalledWith(
@@ -647,6 +729,86 @@ describe('Product Write Controllers', () => {
         mockResponse,
         expect.objectContaining({
           message: expect.stringContaining('successfully to Lightspeed and local database'),
+        })
+      );
+    });
+  });
+
+  describe('deleteProductImage', () => {
+    it('should return error for invalid product ID', async () => {
+      mockRequest.params = { id: 'abc', imageId: '1' };
+      await deleteProductImage(mockRequest as Request, mockResponse as Response);
+      expect(mockResponse.sendError).toHaveBeenCalledWith(mockResponse, 'Invalid product ID.');
+    });
+
+    it('should return error if product not found', async () => {
+      mockRequest.params = { id: '999', imageId: '1' };
+      (Product.findByPk as jest.Mock).mockResolvedValue(null);
+
+      await deleteProductImage(mockRequest as Request, mockResponse as Response);
+      expect(mockResponse.sendError).toHaveBeenCalledWith(mockResponse, 'Product not found.');
+    });
+
+    it('should return error if product image not found', async () => {
+      mockRequest.params = { id: '1', imageId: '999' };
+      (Product.findByPk as jest.Mock).mockResolvedValue({ id: 1, lightspeed_item_id: '401' });
+      (ProductImage.findOne as jest.Mock).mockResolvedValue(null);
+
+      await deleteProductImage(mockRequest as Request, mockResponse as Response);
+      expect(mockResponse.sendError).toHaveBeenCalledWith(mockResponse, 'Product image not found.');
+    });
+
+    it('should only show payload in console and not delete in POS or DB when read-only mode is true', async () => {
+      mockRequest.params = { id: '1', imageId: '5' };
+      (Product.findByPk as jest.Mock).mockResolvedValue({ id: 1, lightspeed_item_id: '401' });
+      (ProductImage.findOne as jest.Mock).mockResolvedValue({
+        id: 5,
+        product_id: 1,
+        lightspeed_image_id: '999',
+        filename: 'flower.jpg',
+        destroy: jest.fn(),
+      });
+      (LightspeedService.isReadOnlyMode as jest.Mock).mockResolvedValue(true);
+
+      await deleteProductImage(mockRequest as Request, mockResponse as Response);
+
+      expect(LightspeedService.deleteItemImage).not.toHaveBeenCalled();
+      expect(mockResponse.sendSuccess).toHaveBeenCalledWith(
+        mockResponse,
+        expect.objectContaining({
+          message: expect.stringContaining('Read-only mode is active'),
+        })
+      );
+    });
+
+    it('should delete image in Lightspeed POS and local DB when read-only mode is false', async () => {
+      mockRequest.params = { id: '1', imageId: '5' };
+      const mockProduct = { id: 1, lightspeed_item_id: '401' };
+      const mockImage = {
+        id: 5,
+        product_id: 1,
+        lightspeed_image_id: '999',
+        filename: 'flower.jpg',
+        local_path: '/api/v1/lightspeed/images/flower.jpg',
+        is_featured: false,
+        destroy: jest.fn().mockResolvedValue(true),
+      };
+
+      (Product.findByPk as jest.Mock).mockResolvedValue(mockProduct);
+      (ProductImage.findOne as jest.Mock).mockResolvedValue(mockImage);
+      (LightspeedService.isReadOnlyMode as jest.Mock).mockResolvedValue(false);
+      (LightspeedService.deleteItemImage as jest.Mock).mockResolvedValue({});
+
+      await deleteProductImage(mockRequest as Request, mockResponse as Response);
+
+      expect(LightspeedService.deleteItemImage).toHaveBeenCalledWith('999', '401');
+      expect(mockImage.destroy).toHaveBeenCalled();
+      expect(mockResponse.sendSuccess).toHaveBeenCalledWith(
+        mockResponse,
+        expect.objectContaining({
+          message: expect.stringContaining('deleted successfully from Lightspeed and local database'),
+          deletedImageId: 5,
+          lightspeedImageId: '999',
         })
       );
     });
