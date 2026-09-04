@@ -12,146 +12,146 @@ export const customerCreateValidator = [
     .notEmpty()
     .withMessage('Last name is required'),
   body('email_primary')
-    .optional({ checkFalsy: true })
+    .optional({ nullable: true, checkFalsy: true })
     .trim()
     .isEmail()
     .withMessage('Must be a valid email address'),
   body('email_secondary')
-    .optional({ checkFalsy: true })
+    .optional({ nullable: true, checkFalsy: true })
     .trim()
     .isEmail()
     .withMessage('Must be a valid email address'),
   body('dob')
-    .optional({ checkFalsy: true })
+    .optional({ nullable: true, checkFalsy: true })
     .isISO8601()
     .withMessage('DOB must be a valid ISO8601 date'),
   body('no_email')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isBoolean()
     .withMessage('no_email must be a boolean'),
   body('no_phone')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isBoolean()
     .withMessage('no_phone must be a boolean'),
   body('no_mail')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isBoolean()
     .withMessage('no_mail must be a boolean'),
   body('note_is_public')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isBoolean()
     .withMessage('note_is_public must be a boolean'),
   body('customer_type_id')
-    .optional({ checkFalsy: true })
+    .optional({ nullable: true, checkFalsy: true })
     .isNumeric()
     .withMessage('customer_type_id must be a number'),
   body('credit_account_id')
-    .optional({ checkFalsy: true })
+    .optional({ nullable: true, checkFalsy: true })
     .isNumeric()
     .withMessage('credit_account_id must be a number'),
   body('tax_category_id')
-    .optional({ checkFalsy: true })
+    .optional({ nullable: true, checkFalsy: true })
     .isNumeric()
     .withMessage('tax_category_id must be a number'),
   body('discount_id')
-    .optional({ checkFalsy: true })
+    .optional({ nullable: true, checkFalsy: true })
     .isNumeric()
     .withMessage('discount_id must be a number'),
   body('custom')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isString(),
   body('phone_mobile')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isString(),
   body('phone_home')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isString(),
   body('phone_work')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isString(),
   body('phone_pager')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isString(),
   body('phone_fax')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isString(),
 ];
 
 export const customerUpdateValidator = [
   body('first_name')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isString()
     .trim()
     .notEmpty()
     .withMessage('First name cannot be empty'),
   body('last_name')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isString()
     .trim()
     .notEmpty()
     .withMessage('Last name cannot be empty'),
   body('email_primary')
-    .optional({ checkFalsy: true })
+    .optional({ nullable: true, checkFalsy: true })
     .trim()
     .isEmail()
     .withMessage('Must be a valid email address'),
   body('email_secondary')
-    .optional({ checkFalsy: true })
+    .optional({ nullable: true, checkFalsy: true })
     .trim()
     .isEmail()
     .withMessage('Must be a valid email address'),
   body('dob')
-    .optional({ checkFalsy: true })
+    .optional({ nullable: true, checkFalsy: true })
     .isISO8601()
     .withMessage('DOB must be a valid ISO8601 date'),
   body('no_email')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isBoolean()
     .withMessage('no_email must be a boolean'),
   body('no_phone')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isBoolean()
     .withMessage('no_phone must be a boolean'),
   body('no_mail')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isBoolean()
     .withMessage('no_mail must be a boolean'),
   body('note_is_public')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isBoolean()
     .withMessage('note_is_public must be a boolean'),
   body('customer_type_id')
-    .optional({ checkFalsy: true })
+    .optional({ nullable: true, checkFalsy: true })
     .isNumeric()
     .withMessage('customer_type_id must be a number'),
   body('credit_account_id')
-    .optional({ checkFalsy: true })
+    .optional({ nullable: true, checkFalsy: true })
     .isNumeric()
     .withMessage('credit_account_id must be a number'),
   body('tax_category_id')
-    .optional({ checkFalsy: true })
+    .optional({ nullable: true, checkFalsy: true })
     .isNumeric()
     .withMessage('tax_category_id must be a number'),
   body('discount_id')
-    .optional({ checkFalsy: true })
+    .optional({ nullable: true, checkFalsy: true })
     .isNumeric()
     .withMessage('discount_id must be a number'),
   body('custom')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isString(),
   body('phone_mobile')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isString(),
   body('phone_home')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isString(),
   body('phone_work')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isString(),
   body('phone_pager')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isString(),
   body('phone_fax')
-    .optional()
+    .optional({ nullable: true, checkFalsy: true })
     .isString(),
 ];
