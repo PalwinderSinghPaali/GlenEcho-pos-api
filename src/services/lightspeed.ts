@@ -2531,6 +2531,45 @@ export class LightspeedService {
   }
 
   /**
+   * createCustomer - creates a customer in Lightspeed POS
+   */
+  public static async createCustomer(payload: any): Promise<any> {
+    logger.info('Creating customer in Lightspeed POS with payload:', payload);
+    return this.makeRequest('Customer.json', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /**
+   * updateCustomer - updates a customer in Lightspeed POS
+   */
+  public static async updateCustomer(lightspeedCustomerId: string, payload: any): Promise<any> {
+    const path = `Customer/${lightspeedCustomerId}.json`;
+    logger.info(`Updating customer ${lightspeedCustomerId} in Lightspeed POS with payload:`, payload);
+    return this.makeRequest(path, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /**
+   * deleteCustomer - archives a customer in Lightspeed POS via DELETE
+   */
+  public static async deleteCustomer(lightspeedCustomerId: string): Promise<any> {
+    const path = `Customer/${lightspeedCustomerId}.json`;
+    logger.info(`Archiving customer ${lightspeedCustomerId} in Lightspeed POS via DELETE...`);
+    return this.makeRequest(path, { method: 'DELETE' });
+  }
+
+  /**
+   * archiveCustomer - alias for deleteCustomer
+   */
+  public static async archiveCustomer(lightspeedCustomerId: string): Promise<any> {
+    return this.deleteCustomer(lightspeedCustomerId);
+  }
+
+  /**
    * pushSale - sends a Sale transaction payload to Lightspeed
    */
   public static async pushSale(salePayload: any): Promise<any> {
@@ -3193,6 +3232,14 @@ export class LightspeedService {
           });
           if (typeMap) {
             customerTypeId = typeMap.local_id;
+          } else {
+            const ct = await CustomerType.findOne({
+              where: { lightspeed_customer_type_id: cust.customerTypeID.toString() },
+              transaction,
+            });
+            if (ct) {
+              customerTypeId = ct.id;
+            }
           }
         }
 
@@ -3205,6 +3252,59 @@ export class LightspeedService {
           });
           if (accMap) {
             creditAccountId = accMap.local_id;
+          } else {
+            const ca = await CreditAccount.findOne({
+              where: { lightspeed_credit_account_id: cust.creditAccountID.toString() },
+              transaction,
+            });
+            if (ca) {
+              creditAccountId = ca.id;
+            }
+          }
+        }
+
+        // Resolve discount mapping
+        let discountId: number | null = null;
+        const lsDiscountId = cust.discountID || (cust.Discount && cust.Discount.discountID);
+        if (lsDiscountId && lsDiscountId.toString() !== '0') {
+          const discMap = await LightspeedEntityMap.findOne({
+            where: { entity_type: 'discount', lightspeed_id: lsDiscountId.toString() },
+            transaction,
+          });
+          if (discMap) {
+            discountId = discMap.local_id;
+          } else {
+            let discRecord = await Discount.findOne({
+              where: { lightspeed_discount_id: lsDiscountId.toString() },
+              transaction,
+            });
+            if (!discRecord && cust.Discount) {
+              discRecord = await Discount.create(
+                {
+                  lightspeed_discount_id: lsDiscountId.toString(),
+                  name: cust.Discount.name || `Discount ${lsDiscountId}`,
+                  discount_amount: parseFloat(cust.Discount.discountAmount || '0'),
+                  discount_percent: parseFloat(cust.Discount.discountPercent || '0'),
+                  require_customer: cust.Discount.requireCustomer === 'true',
+                  archived: cust.Discount.archived === 'true',
+                },
+                { transaction }
+              );
+
+              await LightspeedEntityMap.create(
+                {
+                  entity_type: 'discount',
+                  lightspeed_id: lsDiscountId.toString(),
+                  local_id: discRecord.id,
+                  hash: '',
+                  last_sync: new Date(),
+                },
+                { transaction }
+              );
+            }
+            if (discRecord) {
+              discountId = discRecord.id;
+            }
           }
         }
 
@@ -3253,6 +3353,10 @@ export class LightspeedService {
 
         // Extract Contact sub-objects
         const contact = cust.Contact || {};
+        const contactId = contact.contactID
+          ? String(contact.contactID)
+          : (cust.contactID ? String(cust.contactID) : null);
+        const customField = contact.custom || cust.custom || null;
 
         // Emails
         const emails = this.extractList<any>(contact.Emails || {}, 'ContactEmail');
@@ -3264,6 +3368,8 @@ export class LightspeedService {
         const mobilePhone = phones.find((p: any) => p.useType === 'Mobile')?.number || null;
         const homePhone = phones.find((p: any) => p.useType === 'Home')?.number || null;
         const workPhone = phones.find((p: any) => p.useType === 'Work')?.number || null;
+        const pagerPhone = phones.find((p: any) => p.useType === 'Pager')?.number || null;
+        const faxPhone = phones.find((p: any) => p.useType === 'Fax')?.number || null;
 
         // Websites
         const websites = this.extractList<any>(contact.Websites || {}, 'ContactWebsite');
@@ -3305,7 +3411,7 @@ export class LightspeedService {
             }
           }
         }
-        const tagsString = tagNames.length > 0 ? tagNames.join(', ') : null;
+        const tagsArray = tagNames.length > 0 ? tagNames : null;
 
         const customerPayload = {
           lightspeed_customer_id: cust.customerID.toString(),
@@ -3318,8 +3424,11 @@ export class LightspeedService {
           vat_number: cust.vatNumber || null,
           credit_account_id: creditAccountId,
           customer_type_id: customerTypeId,
+          discount_id: discountId,
           tax_category_id: taxCategoryId,
-          tags: tagsString,
+          tags: tagsArray,
+          custom: customField,
+          contact_id: contactId,
           archived: cust.archived === 'true',
           address_1: primaryAddress.address1 || null,
           address_2: primaryAddress.address2 || null,
@@ -3332,6 +3441,8 @@ export class LightspeedService {
           phone_mobile: mobilePhone,
           phone_home: homePhone,
           phone_work: workPhone,
+          phone_pager: pagerPhone,
+          phone_fax: faxPhone,
           email_primary: primaryEmail,
           email_secondary: secondaryEmail,
           website,
@@ -3351,7 +3462,8 @@ export class LightspeedService {
           phone: mobilePhone,
           archived: cust.archived === 'true',
           tax_category_id: taxCategoryId,
-          tags: tagsString,
+          discount_id: discountId,
+          tags: tagsArray ? [...tagsArray].sort() : [],
           note: noteText,
           note_is_public: noteIsPublic,
         };
@@ -3394,6 +3506,32 @@ export class LightspeedService {
       vatNumber: customer.vat_number || null,
     };
 
+    // Association IDs for Lightspeed
+    if (customer.customer_type_id) {
+      const ct = await CustomerType.findByPk(customer.customer_type_id);
+      if (ct?.lightspeed_customer_type_id) {
+        payload.customerTypeID = parseInt(ct.lightspeed_customer_type_id, 10) || 0;
+      }
+    }
+    if (customer.discount_id) {
+      const disc = await Discount.findByPk(customer.discount_id);
+      if (disc?.lightspeed_discount_id) {
+        payload.discountID = parseInt(disc.lightspeed_discount_id, 10) || 0;
+      }
+    }
+    if (customer.tax_category_id) {
+      const tc = await TaxCategory.findByPk(customer.tax_category_id);
+      if (tc?.lightspeed_tax_category_id) {
+        payload.taxCategoryID = parseInt(tc.lightspeed_tax_category_id, 10) || 0;
+      }
+    }
+    if (customer.credit_account_id) {
+      const ca = await CreditAccount.findByPk(customer.credit_account_id);
+      if (ca?.lightspeed_credit_account_id) {
+        payload.creditAccountID = parseInt(ca.lightspeed_credit_account_id, 10) || 0;
+      }
+    }
+
     // Note
     if (customer.note) {
       payload.Note = {
@@ -3402,12 +3540,30 @@ export class LightspeedService {
       };
     }
 
+    // Tags
+    if (customer.tags) {
+      const tagList = Array.isArray(customer.tags)
+        ? customer.tags
+        : typeof customer.tags === 'string'
+          ? (customer.tags as string).split(',').map((t: string) => t.trim()).filter(Boolean)
+          : [];
+      if (tagList.length === 1) {
+        payload.Tags = { tag: tagList[0] };
+      } else if (tagList.length > 1) {
+        payload.Tags = tagList.map((t: string) => ({ tag: t }));
+      }
+    }
+
     // Contact details
     const contact: any = {
       noEmail: customer.no_email ? 'true' : 'false',
       noPhone: customer.no_phone ? 'true' : 'false',
       noMail: customer.no_mail ? 'true' : 'false',
     };
+
+    if (customer.custom) {
+      contact.custom = customer.custom;
+    }
 
     // Address
     if (customer.address_1 || customer.city || customer.zip) {
@@ -3447,6 +3603,12 @@ export class LightspeedService {
     }
     if (customer.phone_work) {
       phoneList.push({ number: customer.phone_work, useType: 'Work' });
+    }
+    if (customer.phone_pager) {
+      phoneList.push({ number: customer.phone_pager, useType: 'Pager' });
+    }
+    if (customer.phone_fax) {
+      phoneList.push({ number: customer.phone_fax, useType: 'Fax' });
     }
     if (phoneList.length > 0) {
       contact.Phones = { ContactPhone: phoneList };
