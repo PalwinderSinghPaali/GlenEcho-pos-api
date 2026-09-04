@@ -461,6 +461,92 @@ describe('Customer Controllers', () => {
         })
       );
     });
+
+    it('should cleanly handle null values for optional fields without saving "null" string', async () => {
+      mockRequest.body = {
+        first_name: 'Null',
+        last_name: 'Tester',
+        title: null,
+        company: null,
+        company_registration_number: null,
+        vat_number: null,
+        dob: null,
+        custom: null,
+        phone_mobile: null,
+        phone_home: null,
+        phone_work: null,
+        phone_pager: null,
+        phone_fax: null,
+        email_primary: null,
+        email_secondary: null,
+        website: null,
+        note: null,
+        customer_type_id: null,
+        discount_id: null,
+        tax_category_id: null,
+        credit_account_id: null,
+      };
+
+      (LightspeedService.isReadOnlyMode as jest.Mock).mockResolvedValue(false);
+      const mockLsCustomer = {
+        customerID: '505',
+        firstName: 'Null',
+        lastName: 'Tester',
+      };
+      (LightspeedService.createCustomer as jest.Mock).mockResolvedValue({
+        Customer: mockLsCustomer,
+      });
+      (LightspeedService.extractList as jest.Mock).mockReturnValue([mockLsCustomer]);
+      (LightspeedService.calculateHash as jest.Mock).mockReturnValue('mockhashnull');
+
+      const mockCreated = {
+        id: 8,
+        first_name: 'Null',
+        last_name: 'Tester',
+        lightspeed_customer_id: '505',
+        toJSON: function () {
+          return this;
+        },
+      };
+      (Customer.create as jest.Mock).mockResolvedValue(mockCreated);
+      (Customer.findByPk as jest.Mock).mockResolvedValue(mockCreated);
+      (LightspeedEntityMap.upsert as jest.Mock).mockResolvedValue([{}]);
+
+      await createCustomer(mockRequest as Request, mockResponse as Response);
+
+      expect(Customer.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          first_name: 'Null',
+          last_name: 'Tester',
+          title: null,
+          company: null,
+          company_registration_number: null,
+          vat_number: null,
+          dob: null,
+          custom: null,
+          phone_mobile: null,
+          phone_home: null,
+          phone_work: null,
+          phone_pager: null,
+          phone_fax: null,
+          email_primary: null,
+          email_secondary: null,
+          website: null,
+          note: null,
+          customer_type_id: null,
+          discount_id: null,
+          tax_category_id: null,
+          credit_account_id: null,
+        })
+      );
+      expect(mockResponse.sendSuccess).toHaveBeenCalledWith(
+        mockResponse,
+        expect.objectContaining({
+          message: 'Customer created successfully in Lightspeed and local database.',
+        }),
+        201
+      );
+    });
   });
 
   describe('updateCustomer', () => {
@@ -615,6 +701,69 @@ describe('Customer Controllers', () => {
       expect(mockCust.update).toHaveBeenCalledWith(
         expect.objectContaining({
           tags: ['VIP', 'Contractor'],
+        })
+      );
+    });
+
+    it('should clear fields when null is explicitly provided in updateCustomer', async () => {
+      mockRequest.params = { id: '1' };
+      mockRequest.body = {
+        custom: null,
+        phone_mobile: null,
+        phone_home: null,
+        discount_id: null,
+      };
+
+      const mockCust = {
+        id: 1,
+        first_name: 'John',
+        last_name: 'Doe',
+        custom: 'Existing Custom',
+        phone_mobile: '5551234567',
+        phone_home: '5557654321',
+        discount_id: 10,
+        lightspeed_customer_id: 'ls_cust_123',
+        contact_id: 'contact_456',
+        update: jest.fn().mockResolvedValue(true),
+        toJSON: function () {
+          return this;
+        },
+      };
+
+      (Customer.findByPk as jest.Mock).mockResolvedValue(mockCust);
+      (LightspeedService.isReadOnlyMode as jest.Mock).mockResolvedValue(false);
+      (LightspeedService.updateCustomer as jest.Mock).mockResolvedValue({
+        Customer: { customerID: 'ls_cust_123' },
+      });
+      (LightspeedService.extractList as jest.Mock).mockReturnValue([
+        { customerID: 'ls_cust_123' },
+      ]);
+      (LightspeedService.calculateHash as jest.Mock).mockReturnValue('mockhashnullupdate');
+      (LightspeedEntityMap.upsert as jest.Mock).mockResolvedValue([{}]);
+
+      await updateCustomer(mockRequest as Request, mockResponse as Response);
+
+      expect(LightspeedService.updateCustomer).toHaveBeenCalledWith(
+        'ls_cust_123',
+        expect.objectContaining({
+          discountID: 0,
+          Contact: expect.objectContaining({
+            custom: '',
+          }),
+        })
+      );
+      expect(mockCust.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          custom: null,
+          phone_mobile: null,
+          phone_home: null,
+          discount_id: null,
+        })
+      );
+      expect(mockResponse.sendSuccess).toHaveBeenCalledWith(
+        mockResponse,
+        expect.objectContaining({
+          message: 'Customer updated successfully in Lightspeed and local database.',
         })
       );
     });

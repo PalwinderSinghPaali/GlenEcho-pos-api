@@ -325,82 +325,91 @@ export const createCustomer = async (req: Request, res: Response) => {
     // Biographical details
     const firstName = String(body.first_name || body.firstName || '').trim();
     const lastName = String(body.last_name || body.lastName || '').trim();
-    const title = body.title !== undefined ? String(body.title) : null;
-    const company = body.company !== undefined ? String(body.company) : null;
+    const title = body.title ? String(body.title).trim() : null;
+    const company = body.company ? String(body.company).trim() : null;
     const companyRegistrationNumber =
-      body.company_registration_number ?? body.companyRegistrationNumber ?? null;
-    const vatNumber = body.vat_number ?? body.vatNumber ?? null;
+      (body.company_registration_number ?? body.companyRegistrationNumber)
+        ? String(body.company_registration_number ?? body.companyRegistrationNumber).trim()
+        : null;
+    const vatNumber =
+      (body.vat_number ?? body.vatNumber)
+        ? String(body.vat_number ?? body.vatNumber).trim()
+        : null;
     const dob = body.dob ?? body.birth_date ?? body.birthDate ?? null;
 
     // Address details
-    const address1 = body.address_1 ?? body.address1 ?? body.address ?? addressesObj.address1 ?? null;
-    const address2 = body.address_2 ?? body.address2 ?? addressesObj.address2 ?? null;
-    const city = body.city ?? addressesObj.city ?? null;
-    const state = body.state ?? body.province ?? addressesObj.state ?? null;
-    const stateCode = body.state_code ?? body.stateCode ?? addressesObj.stateCode ?? null;
-    const zip = body.zip ?? body.postal_code ?? body.postalCode ?? addressesObj.zip ?? null;
-    const country = body.country ?? addressesObj.country ?? null;
-    const countryCode = body.country_code ?? body.countryCode ?? addressesObj.countryCode ?? null;
+    const address1 = (body.address_1 ?? body.address1 ?? body.address ?? addressesObj.address1) || null;
+    const address2 = (body.address_2 ?? body.address2 ?? addressesObj.address2) || null;
+    const city = (body.city ?? addressesObj.city) || null;
+    const state = (body.state ?? body.province ?? addressesObj.state) || null;
+    const stateCode = (body.state_code ?? body.stateCode ?? addressesObj.stateCode) || null;
+    const zip = (body.zip ?? body.postal_code ?? body.postalCode ?? addressesObj.zip) || null;
+    const country = (body.country ?? addressesObj.country) || null;
+    const countryCode = (body.country_code ?? body.countryCode ?? addressesObj.countryCode) || null;
 
     // Phone details
-    const phoneHome =
+    const rawPhoneHome =
       body.phone_home ??
       body.phoneHome ??
       body.home ??
-      phonesList.find((p) => p.useType?.toLowerCase() === 'home')?.number ??
-      null;
-    const phoneWork =
+      phonesList.find((p) => p.useType?.toLowerCase() === 'home')?.number;
+    const phoneHome = rawPhoneHome ? String(rawPhoneHome).trim() : null;
+
+    const rawPhoneWork =
       body.phone_work ??
       body.phoneWork ??
       body.work ??
-      phonesList.find((p) => p.useType?.toLowerCase() === 'work')?.number ??
-      null;
-    const phoneMobile =
+      phonesList.find((p) => p.useType?.toLowerCase() === 'work')?.number;
+    const phoneWork = rawPhoneWork ? String(rawPhoneWork).trim() : null;
+
+    const rawPhoneMobile =
       body.phone_mobile ??
       body.phoneMobile ??
       body.mobile ??
       phonesList.find((p) => p.useType?.toLowerCase() === 'mobile')?.number ??
       (phonesList[0]?.number && !phonesList[0]?.useType ? phonesList[0].number : null);
-    const phonePager =
+    const phoneMobile = rawPhoneMobile ? String(rawPhoneMobile).trim() : null;
+
+    const rawPhonePager =
       body.phone_pager ??
       body.phonePager ??
       body.pager ??
-      phonesList.find((p) => p.useType?.toLowerCase() === 'pager')?.number ??
-      null;
-    const phoneFax =
+      phonesList.find((p) => p.useType?.toLowerCase() === 'pager')?.number;
+    const phonePager = rawPhonePager ? String(rawPhonePager).trim() : null;
+
+    const rawPhoneFax =
       body.phone_fax ??
       body.phoneFax ??
       body.fax ??
-      phonesList.find((p) => p.useType?.toLowerCase() === 'fax')?.number ??
-      null;
+      phonesList.find((p) => p.useType?.toLowerCase() === 'fax')?.number;
+    const phoneFax = rawPhoneFax ? String(rawPhoneFax).trim() : null;
 
     // Email details
-    const emailPrimary =
+    const rawEmailPrimary =
       body.email_primary ??
       body.emailPrimary ??
       body.email ??
       body.email_1 ??
       emailsList.find((e) => e.useType?.toLowerCase() === 'primary')?.address ??
       (emailsList[0]?.address && !emailsList[0]?.useType ? emailsList[0].address : null);
-    const emailSecondary =
+    const emailPrimary = rawEmailPrimary ? String(rawEmailPrimary).trim() : null;
+
+    const rawEmailSecondary =
       body.email_secondary ??
       body.emailSecondary ??
       body.email_2 ??
-      emailsList.find((e) => e.useType?.toLowerCase() === 'secondary')?.address ??
-      null;
+      emailsList.find((e) => e.useType?.toLowerCase() === 'secondary')?.address;
+    const emailSecondary = rawEmailSecondary ? String(rawEmailSecondary).trim() : null;
 
     // Other details
-    const website =
+    const rawWebsite =
       body.website ??
       websitesList[0]?.url ??
-      (typeof contactObj.Websites === 'string' ? contactObj.Websites : null) ??
-      null;
-    const custom =
-      body.custom !== undefined
-        ? (body.custom ? String(body.custom) : null)
-        : contactObj.custom !== undefined
-          ? (contactObj.custom ? String(contactObj.custom) : null)
-          : null;
+      (typeof contactObj.Websites === 'string' ? contactObj.Websites : null);
+    const website = rawWebsite ? String(rawWebsite).trim() : null;
+
+    const rawCustom = body.custom !== undefined ? body.custom : contactObj.custom;
+    const custom = rawCustom ? String(rawCustom).trim() : null;
 
     // Contact Preferences / Consent
     const noEmail =
@@ -680,26 +689,41 @@ export const updateCustomer = async (req: Request, res: Response) => {
     const websitesList: any[] = Array.isArray(websitesObj) ? websitesObj : [websitesObj].filter(Boolean);
     const noteObj = body.Note || {};
 
+    const resolveUpdateField = (keys: any[], current: any) => {
+      for (const k of keys) {
+        if (k !== undefined) {
+          if (k === null || (typeof k === 'string' && k.trim() === '')) {
+            return null;
+          }
+          return typeof k === 'string' ? k.trim() : k;
+        }
+      }
+      return current;
+    };
+
     // Biographical
+    const rawFirstName = body.first_name !== undefined ? body.first_name : body.firstName;
     const newFirstName =
-      body.first_name !== undefined || body.firstName !== undefined
-        ? String(body.first_name || body.firstName).trim()
+      rawFirstName !== undefined && rawFirstName !== null && String(rawFirstName).trim() !== ''
+        ? String(rawFirstName).trim()
         : customer.first_name;
+
+    const rawLastName = body.last_name !== undefined ? body.last_name : body.lastName;
     const newLastName =
-      body.last_name !== undefined || body.lastName !== undefined
-        ? String(body.last_name || body.lastName).trim()
+      rawLastName !== undefined && rawLastName !== null && String(rawLastName).trim() !== ''
+        ? String(rawLastName).trim()
         : customer.last_name;
-    const newTitle = body.title !== undefined ? (body.title ? String(body.title) : null) : customer.title;
-    const newCompany =
-      body.company !== undefined ? (body.company ? String(body.company) : null) : customer.company;
-    const newCompanyRegistrationNumber =
-      body.company_registration_number !== undefined || body.companyRegistrationNumber !== undefined
-        ? body.company_registration_number ?? body.companyRegistrationNumber ?? null
-        : customer.company_registration_number;
-    const newVatNumber =
-      body.vat_number !== undefined || body.vatNumber !== undefined
-        ? body.vat_number ?? body.vatNumber ?? null
-        : customer.vat_number;
+
+    const newTitle = resolveUpdateField([body.title], customer.title);
+    const newCompany = resolveUpdateField([body.company], customer.company);
+    const newCompanyRegistrationNumber = resolveUpdateField(
+      [body.company_registration_number, body.companyRegistrationNumber],
+      customer.company_registration_number
+    );
+    const newVatNumber = resolveUpdateField(
+      [body.vat_number, body.vatNumber],
+      customer.vat_number
+    );
 
     let newDob = customer.dob;
     if (body.dob !== undefined || body.birth_date !== undefined || body.birthDate !== undefined) {
@@ -708,110 +732,157 @@ export const updateCustomer = async (req: Request, res: Response) => {
     }
 
     // Address
-    const newAddress1 =
-      body.address_1 ?? body.address1 ?? body.address ?? addressesObj.address1 ?? customer.address_1;
-    const newAddress2 = body.address_2 ?? body.address2 ?? addressesObj.address2 ?? customer.address_2;
-    const newCity = body.city ?? addressesObj.city ?? customer.city;
-    const newState = body.state ?? body.province ?? addressesObj.state ?? customer.state;
-    const newStateCode = body.state_code ?? body.stateCode ?? addressesObj.stateCode ?? customer.state_code;
-    const newZip = body.zip ?? body.postal_code ?? body.postalCode ?? addressesObj.zip ?? customer.zip;
-    const newCountry = body.country ?? addressesObj.country ?? customer.country;
-    const newCountryCode =
-      body.country_code ?? body.countryCode ?? addressesObj.countryCode ?? customer.country_code;
+    const newAddress1 = resolveUpdateField(
+      [body.address_1, body.address1, body.address, addressesObj.address1],
+      customer.address_1
+    );
+    const newAddress2 = resolveUpdateField(
+      [body.address_2, body.address2, addressesObj.address2],
+      customer.address_2
+    );
+    const newCity = resolveUpdateField(
+      [body.city, addressesObj.city],
+      customer.city
+    );
+    const newState = resolveUpdateField(
+      [body.state, body.province, addressesObj.state],
+      customer.state
+    );
+    const newStateCode = resolveUpdateField(
+      [body.state_code, body.stateCode, addressesObj.stateCode],
+      customer.state_code
+    );
+    const newZip = resolveUpdateField(
+      [body.zip, body.postal_code, body.postalCode, addressesObj.zip],
+      customer.zip
+    );
+    const newCountry = resolveUpdateField(
+      [body.country, addressesObj.country],
+      customer.country
+    );
+    const newCountryCode = resolveUpdateField(
+      [body.country_code, body.countryCode, addressesObj.countryCode],
+      customer.country_code
+    );
 
     // Phone
-    const newPhoneHome =
-      body.phone_home ??
-      body.phoneHome ??
-      body.home ??
-      phonesList.find((p) => p.useType?.toLowerCase() === 'home')?.number ??
-      customer.phone_home;
-    const newPhoneWork =
-      body.phone_work ??
-      body.phoneWork ??
-      body.work ??
-      phonesList.find((p) => p.useType?.toLowerCase() === 'work')?.number ??
-      customer.phone_work;
-    const newPhoneMobile =
-      body.phone_mobile ??
-      body.phoneMobile ??
-      body.mobile ??
-      phonesList.find((p) => p.useType?.toLowerCase() === 'mobile')?.number ??
-      customer.phone_mobile;
-    const newPhonePager =
-      body.phone_pager ??
-      body.phonePager ??
-      body.pager ??
-      phonesList.find((p) => p.useType?.toLowerCase() === 'pager')?.number ??
-      customer.phone_pager;
-    const newPhoneFax =
-      body.phone_fax ??
-      body.phoneFax ??
-      body.fax ??
-      phonesList.find((p) => p.useType?.toLowerCase() === 'fax')?.number ??
-      customer.phone_fax;
+    const newPhoneHome = resolveUpdateField(
+      [
+        body.phone_home,
+        body.phoneHome,
+        body.home,
+        phonesList.find((p) => p.useType?.toLowerCase() === 'home')?.number,
+      ],
+      customer.phone_home
+    );
+    const newPhoneWork = resolveUpdateField(
+      [
+        body.phone_work,
+        body.phoneWork,
+        body.work,
+        phonesList.find((p) => p.useType?.toLowerCase() === 'work')?.number,
+      ],
+      customer.phone_work
+    );
+    const newPhoneMobile = resolveUpdateField(
+      [
+        body.phone_mobile,
+        body.phoneMobile,
+        body.mobile,
+        phonesList.find((p) => p.useType?.toLowerCase() === 'mobile')?.number,
+      ],
+      customer.phone_mobile
+    );
+    const newPhonePager = resolveUpdateField(
+      [
+        body.phone_pager,
+        body.phonePager,
+        body.pager,
+        phonesList.find((p) => p.useType?.toLowerCase() === 'pager')?.number,
+      ],
+      customer.phone_pager
+    );
+    const newPhoneFax = resolveUpdateField(
+      [
+        body.phone_fax,
+        body.phoneFax,
+        body.fax,
+        phonesList.find((p) => p.useType?.toLowerCase() === 'fax')?.number,
+      ],
+      customer.phone_fax
+    );
 
     // Email
-    const newEmailPrimary =
-      body.email_primary ??
-      body.emailPrimary ??
-      body.email ??
-      body.email_1 ??
-      emailsList.find((e) => e.useType?.toLowerCase() === 'primary')?.address ??
-      customer.email_primary;
-    const newEmailSecondary =
-      body.email_secondary ??
-      body.emailSecondary ??
-      body.email_2 ??
-      emailsList.find((e) => e.useType?.toLowerCase() === 'secondary')?.address ??
-      customer.email_secondary;
+    const newEmailPrimary = resolveUpdateField(
+      [
+        body.email_primary,
+        body.emailPrimary,
+        body.email,
+        body.email_1,
+        emailsList.find((e) => e.useType?.toLowerCase() === 'primary')?.address,
+      ],
+      customer.email_primary
+    );
+    const newEmailSecondary = resolveUpdateField(
+      [
+        body.email_secondary,
+        body.emailSecondary,
+        body.email_2,
+        emailsList.find((e) => e.useType?.toLowerCase() === 'secondary')?.address,
+      ],
+      customer.email_secondary
+    );
 
     // Other
-    const newWebsite =
-      body.website ??
-      websitesList[0]?.url ??
-      (typeof contactObj.Websites === 'string' ? contactObj.Websites : null) ??
-      customer.website;
-    const newCustom =
-      body.custom !== undefined
-        ? (body.custom ? String(body.custom) : null)
-        : contactObj.custom !== undefined
-          ? (contactObj.custom ? String(contactObj.custom) : null)
-          : customer.custom;
+    const newWebsite = resolveUpdateField(
+      [
+        body.website,
+        websitesList[0]?.url,
+        typeof contactObj.Websites === 'string' ? contactObj.Websites : undefined,
+      ],
+      customer.website
+    );
+    const newCustom = resolveUpdateField(
+      [body.custom, contactObj.custom],
+      customer.custom
+    );
 
     // Consent
     const newNoEmail =
       body.no_email !== undefined
-        ? !!body.no_email
+        ? (body.no_email === null ? false : !!body.no_email)
         : body.noEmail !== undefined
-          ? !!body.noEmail
+          ? (body.noEmail === null ? false : !!body.noEmail)
           : contactObj.noEmail !== undefined
             ? contactObj.noEmail === 'true' || contactObj.noEmail === true
             : customer.no_email;
     const newNoPhone =
       body.no_phone !== undefined
-        ? !!body.no_phone
+        ? (body.no_phone === null ? false : !!body.no_phone)
         : body.noPhone !== undefined
-          ? !!body.noPhone
+          ? (body.noPhone === null ? false : !!body.noPhone)
           : contactObj.noPhone !== undefined
             ? contactObj.noPhone === 'true' || contactObj.noPhone === true
             : customer.no_phone;
     const newNoMail =
       body.no_mail !== undefined
-        ? !!body.no_mail
+        ? (body.no_mail === null ? false : !!body.no_mail)
         : body.noMail !== undefined
-          ? !!body.noMail
+          ? (body.noMail === null ? false : !!body.noMail)
           : contactObj.noMail !== undefined
             ? contactObj.noMail === 'true' || contactObj.noMail === true
             : customer.no_mail;
 
     // Notes
-    const newNote = body.note ?? body.notes ?? noteObj.note ?? customer.note;
+    const newNote = resolveUpdateField(
+      [body.note, body.notes, noteObj.note],
+      customer.note
+    );
     const newNoteIsPublic =
       body.note_is_public !== undefined
-        ? !!body.note_is_public
+        ? (body.note_is_public === null ? false : !!body.note_is_public)
         : body.noteIsPublic !== undefined
-          ? !!body.noteIsPublic
+          ? (body.noteIsPublic === null ? false : !!body.noteIsPublic)
           : noteObj.isPublic !== undefined
             ? noteObj.isPublic === 'true' || noteObj.isPublic === true
             : customer.note_is_public;
@@ -840,14 +911,37 @@ export const updateCustomer = async (req: Request, res: Response) => {
       lsDiscountId,
     } = await resolveAssociations(body);
 
-    const finalCustomerTypeId =
-      resolvedCustomerTypeId !== null ? resolvedCustomerTypeId : customer.customer_type_id;
-    const finalCreditAccountId =
-      resolvedCreditAccountId !== null ? resolvedCreditAccountId : customer.credit_account_id;
-    const finalTaxCategoryId =
-      resolvedTaxCategoryId !== null ? resolvedTaxCategoryId : customer.tax_category_id;
-    const finalDiscountId =
-      resolvedDiscountId !== null ? resolvedDiscountId : customer.discount_id;
+    const customerTypePassed =
+      body.customer_type_id !== undefined ||
+      body.customerTypeId !== undefined ||
+      body.customerTypeID !== undefined;
+    const finalCustomerTypeId = customerTypePassed
+      ? resolvedCustomerTypeId
+      : customer.customer_type_id;
+
+    const creditAccountPassed =
+      body.credit_account_id !== undefined ||
+      body.creditAccountId !== undefined ||
+      body.creditAccountID !== undefined;
+    const finalCreditAccountId = creditAccountPassed
+      ? resolvedCreditAccountId
+      : customer.credit_account_id;
+
+    const taxCategoryPassed =
+      body.tax_category_id !== undefined ||
+      body.taxCategoryId !== undefined ||
+      body.taxCategoryID !== undefined;
+    const finalTaxCategoryId = taxCategoryPassed
+      ? resolvedTaxCategoryId
+      : customer.tax_category_id;
+
+    const discountPassed =
+      body.discount_id !== undefined ||
+      body.discountId !== undefined ||
+      body.discountID !== undefined;
+    const finalDiscountId = discountPassed
+      ? resolvedDiscountId
+      : customer.discount_id;
 
     // Build update payload for Lightspeed POS
     const lsPayload: any = {
@@ -864,22 +958,35 @@ export const updateCustomer = async (req: Request, res: Response) => {
       lsPayload.companyRegistrationNumber = newCompanyRegistrationNumber || '';
     }
     if (newVatNumber !== undefined) lsPayload.vatNumber = newVatNumber || '';
-    if (lsCustomerTypeId !== null && lsCustomerTypeId !== undefined) {
+    if (customerTypePassed) {
+      lsPayload.customerTypeID = lsCustomerTypeId ?? 0;
+    } else if (lsCustomerTypeId !== null && lsCustomerTypeId !== undefined) {
       lsPayload.customerTypeID = lsCustomerTypeId;
     }
-    if (lsDiscountId !== null && lsDiscountId !== undefined) {
+    if (discountPassed) {
+      lsPayload.discountID = lsDiscountId ?? 0;
+    } else if (lsDiscountId !== null && lsDiscountId !== undefined) {
       lsPayload.discountID = lsDiscountId;
     }
-    if (lsTaxCategoryId !== null && lsTaxCategoryId !== undefined) {
+    if (taxCategoryPassed) {
+      lsPayload.taxCategoryID = lsTaxCategoryId ?? 0;
+    } else if (lsTaxCategoryId !== null && lsTaxCategoryId !== undefined) {
       lsPayload.taxCategoryID = lsTaxCategoryId;
     }
-    if (lsCreditAccountId !== null && lsCreditAccountId !== undefined) {
+    if (creditAccountPassed) {
+      lsPayload.creditAccountID = lsCreditAccountId ?? 0;
+    } else if (lsCreditAccountId !== null && lsCreditAccountId !== undefined) {
       lsPayload.creditAccountID = lsCreditAccountId;
     }
     lsPayload.archived = newArchived ? 'true' : 'false';
 
     const contactPayload: any = {};
-    if (newCustom !== undefined && newCustom !== null) contactPayload.custom = newCustom;
+    const customPassed = body.custom !== undefined || contactObj.custom !== undefined;
+    if (customPassed) {
+      contactPayload.custom = newCustom || '';
+    } else if (newCustom) {
+      contactPayload.custom = newCustom;
+    }
     contactPayload.noEmail = newNoEmail ? 'true' : 'false';
     contactPayload.noPhone = newNoPhone ? 'true' : 'false';
     contactPayload.noMail = newNoMail ? 'true' : 'false';
