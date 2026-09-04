@@ -34,7 +34,12 @@ export interface CustomerAttributes {
   note: string | null;
   note_is_public: boolean;
   tax_category_id: number | null;
-  tags: string | null;
+  discount_id: number | null;
+  tags: string[] | null;
+  custom: string | null;
+  phone_pager: string | null;
+  phone_fax: string | null;
+  contact_id: string | null;
 }
 
 export type CustomerCreationAttributes = Optional<
@@ -60,6 +65,8 @@ export type CustomerCreationAttributes = Optional<
   | 'phone_mobile'
   | 'phone_home'
   | 'phone_work'
+  | 'phone_pager'
+  | 'phone_fax'
   | 'email_primary'
   | 'email_secondary'
   | 'website'
@@ -69,7 +76,10 @@ export type CustomerCreationAttributes = Optional<
   | 'note'
   | 'note_is_public'
   | 'tax_category_id'
+  | 'discount_id'
   | 'tags'
+  | 'custom'
+  | 'contact_id'
 >;
 
 export class Customer extends Model<CustomerAttributes, CustomerCreationAttributes> implements CustomerAttributes {
@@ -96,6 +106,8 @@ export class Customer extends Model<CustomerAttributes, CustomerCreationAttribut
   declare phone_mobile: string | null;
   declare phone_home: string | null;
   declare phone_work: string | null;
+  declare phone_pager: string | null;
+  declare phone_fax: string | null;
   declare email_primary: string | null;
   declare email_secondary: string | null;
   declare website: string | null;
@@ -105,7 +117,10 @@ export class Customer extends Model<CustomerAttributes, CustomerCreationAttribut
   declare note: string | null;
   declare note_is_public: boolean;
   declare tax_category_id: number | null;
-  declare tags: string | null;
+  declare discount_id: number | null;
+  declare tags: string[] | null;
+  declare custom: string | null;
+  declare contact_id: string | null;
   declare readonly createdAt: Date;
   declare readonly updatedAt: Date;
 }
@@ -215,6 +230,14 @@ Customer.init(
       type: DataTypes.STRING,
       allowNull: true,
     },
+    phone_pager: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    phone_fax: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
     email_primary: {
       type: DataTypes.STRING,
       allowNull: true,
@@ -259,8 +282,25 @@ Customer.init(
         key: 'id',
       },
     },
+    discount_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      references: {
+        model: 'discounts',
+        key: 'id',
+      },
+    },
     tags: {
-      type: DataTypes.TEXT,
+      type: DataTypes.ARRAY(DataTypes.STRING),
+      allowNull: true,
+      defaultValue: [],
+    },
+    custom: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    contact_id: {
+      type: DataTypes.STRING,
       allowNull: true,
     },
   },

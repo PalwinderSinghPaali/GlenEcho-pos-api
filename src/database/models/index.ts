@@ -114,6 +114,9 @@ export const setupAssociations = () => {
   Customer.belongsTo(TaxCategory, { foreignKey: 'tax_category_id', as: 'taxCategory' });
   TaxCategory.hasMany(Customer, { foreignKey: 'tax_category_id', as: 'customers' });
 
+  Customer.belongsTo(Discount, { foreignKey: 'discount_id', as: 'discount' });
+  Discount.hasMany(Customer, { foreignKey: 'discount_id', as: 'customers' });
+
   // Order Associations
   Order.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
   User.hasMany(Order, { foreignKey: 'user_id', as: 'orders' });

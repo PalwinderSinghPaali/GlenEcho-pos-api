@@ -41,6 +41,40 @@ export const customerCreateValidator = [
     .optional()
     .isBoolean()
     .withMessage('note_is_public must be a boolean'),
+  body('customer_type_id')
+    .optional({ checkFalsy: true })
+    .isNumeric()
+    .withMessage('customer_type_id must be a number'),
+  body('credit_account_id')
+    .optional({ checkFalsy: true })
+    .isNumeric()
+    .withMessage('credit_account_id must be a number'),
+  body('tax_category_id')
+    .optional({ checkFalsy: true })
+    .isNumeric()
+    .withMessage('tax_category_id must be a number'),
+  body('discount_id')
+    .optional({ checkFalsy: true })
+    .isNumeric()
+    .withMessage('discount_id must be a number'),
+  body('custom')
+    .optional()
+    .isString(),
+  body('phone_mobile')
+    .optional()
+    .isString(),
+  body('phone_home')
+    .optional()
+    .isString(),
+  body('phone_work')
+    .optional()
+    .isString(),
+  body('phone_pager')
+    .optional()
+    .isString(),
+  body('phone_fax')
+    .optional()
+    .isString(),
 ];
 
 export const customerUpdateValidator = [
@@ -86,4 +120,38 @@ export const customerUpdateValidator = [
     .optional()
     .isBoolean()
     .withMessage('note_is_public must be a boolean'),
+  body('customer_type_id')
+    .optional({ checkFalsy: true })
+    .isNumeric()
+    .withMessage('customer_type_id must be a number'),
+  body('credit_account_id')
+    .optional({ checkFalsy: true })
+    .isNumeric()
+    .withMessage('credit_account_id must be a number'),
+  body('tax_category_id')
+    .optional({ checkFalsy: true })
+    .isNumeric()
+    .withMessage('tax_category_id must be a number'),
+  body('discount_id')
+    .optional({ checkFalsy: true })
+    .isNumeric()
+    .withMessage('discount_id must be a number'),
+  body('custom')
+    .optional()
+    .isString(),
+  body('phone_mobile')
+    .optional()
+    .isString(),
+  body('phone_home')
+    .optional()
+    .isString(),
+  body('phone_work')
+    .optional()
+    .isString(),
+  body('phone_pager')
+    .optional()
+    .isString(),
+  body('phone_fax')
+    .optional()
+    .isString(),
 ];

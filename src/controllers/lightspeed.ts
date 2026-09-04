@@ -373,7 +373,7 @@ export const getAuthUrl = async (req: Request, res: Response) => {
     const redirectUri = config.lightspeed.redirectUri ||
       `${req.secure ? 'https' : 'http'}://${req.get('host')}${config.app.prefix}/${config.app.version}/lightspeed/auth/callback`;
 
-    const authorizeUrl = `https://cloud.lightspeedapp.com/oauth/authorize.php?response_type=code&client_id=${config.lightspeed.clientId}&scope=employee:all&redirect_uri=${encodeURIComponent(redirectUri)}`;
+    const authorizeUrl = `https://cloud.lightspeedapp.com/oauth/authorize.php?response_type=code&client_id=${config.lightspeed.clientId}&scope=employee:register%20employee:all&redirect_uri=${encodeURIComponent(redirectUri)}`;
 
     return res.sendSuccess(res, { authorizeUrl });
   } catch (error: any) {

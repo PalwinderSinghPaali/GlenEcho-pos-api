@@ -18,6 +18,7 @@ import {
   PaymentTransaction,
 } from '@/database/models';
 import { LightspeedService } from './lightspeed';
+import mailService from '@/services/mail';
 
 let isWorkerRunning = false;
 let workerIntervalId: NodeJS.Timeout | null = null;
@@ -247,6 +248,12 @@ export class LightspeedQueue {
         break;
       case 'VOID_SALE':
         await this.executeVoidSale(job.payload);
+        break;
+      case 'POLL_SHIPMENTS':
+        await this.executePollShipments();
+        break;
+      case 'CLEANUP_ABANDONED_CHECKOUTS':
+        await this.executeCleanupAbandonedCheckouts();
         break;
 
       default:
@@ -485,7 +492,7 @@ export class LightspeedQueue {
         jobType: 'SYNC_CUSTOMER_PAGE',
         useTimestamp: true,
         pluralKey: 'customers',
-        queryParams: 'load_relations=["Contact","Note","TaxCategory","Tags"]&archived=all',
+        queryParams: 'load_relations=["Contact","Note","TaxCategory","Discount","Tags"]&archived=all',
       },
       {
         type: 'employee',
@@ -909,6 +916,14 @@ export class LightspeedQueue {
       });
 
       logger.error(`🚨 CRITICAL: stripe payment capture failed for completed sale: Order ${orderId}, Sale ${lightspeedSaleId}`);
+      try {
+        await mailService.sendManagerAlertEmail(
+          `Payment Capture Failed for Order #${order.order_uuid || orderId}`,
+          `Order #${order.order_uuid || orderId} was completed in Lightspeed POS (Sale ID: ${lightspeedSaleId}), but capturing Stripe authorized funds failed permanently with error: ${stripeErr.message || stripeErr}. The order status has been set to 'manual_fulfillment_alert'. Please investigate manually.`
+        );
+      } catch (alertErr) {
+        logger.error('Failed to dispatch manager alert email:', alertErr);
+      }
       throw stripeErr;
     }
 
@@ -922,6 +937,25 @@ export class LightspeedQueue {
     });
 
     logger.info(`Order ${orderId} successfully marked as synced and completed.`);
+
+    // 6. Send order confirmation email to customer
+    try {
+      const customerEmail = order.shipping_address?.email || order.billing_address?.email;
+      if (customerEmail) {
+        const fullOrder = await Order.findByPk(orderId, {
+          include: [
+            {
+              model: OrderItem,
+              as: 'items',
+              include: [{ model: Product, as: 'product' }],
+            },
+          ],
+        });
+        await mailService.sendOrderConfirmationEmail(customerEmail, fullOrder || order);
+      }
+    } catch (emailErr) {
+      logger.error(`Failed to send order confirmation email for Order ${orderId}:`, emailErr);
+    }
   }
 
   /**
@@ -943,6 +977,117 @@ export class LightspeedQueue {
       body: JSON.stringify({ voided: true }),
     });
     logger.info(`Successfully voided sale ID ${lightspeedSaleId} in Lightspeed.`);
+  }
+
+  /**
+   * executePollShipments - polls Lightspeed for synced orders to check if shipments have been marked as shipped in POS
+   */
+  public static async executePollShipments(): Promise<void> {
+    logger.info('Starting Shipment Status Polling...');
+    
+    const syncedOrders = await Order.findAll({
+      where: {
+        status: 'synced',
+        lightspeed_sale_id: { [Op.ne]: null },
+      },
+    });
+
+    if (syncedOrders.length === 0) {
+      logger.info('No synced orders awaiting shipment verification.');
+      return;
+    }
+
+    logger.info(`Found ${syncedOrders.length} synced orders to check for shipment status.`);
+
+    for (const order of syncedOrders) {
+      const saleId = order.lightspeed_sale_id!;
+      if (saleId.startsWith('mock-sale-')) {
+        continue;
+      }
+
+      try {
+        const response = await LightspeedService.makeRequest(`Sale/${saleId}.json?load_relations=["ShipTo"]`);
+        const sale = response.Sale;
+        if (!sale) continue;
+
+        const shipTo = sale.ShipTo;
+        if (shipTo && (shipTo.shipped === 'true' || shipTo.shipped === true)) {
+          logger.info(`Order ${order.id} (Sale ID: ${saleId}) has been marked as shipped in Lightspeed POS.`);
+          
+          await order.update({
+            status: 'shipped',
+            shipped_at: order.shipped_at || new Date(),
+            shipped_locally: true,
+          });
+
+          // Send transactional shipment notification email if customer email exists
+          const customerEmail = order.shipping_address?.email || order.billing_address?.email;
+          if (customerEmail) {
+            await mailService.sendOrderShippedEmail(customerEmail, order);
+          }
+        }
+      } catch (err) {
+        logger.error(`Error polling shipment status for Order ${order.id}, Sale ${saleId}:`, err);
+      }
+    }
+  }
+
+  /**
+   * executeCleanupAbandonedCheckouts - finds orders stuck in pending_payment > 30 minutes,
+   * releases their inventory reservations, cancels local order, and voids open sale in POS.
+   */
+  public static async executeCleanupAbandonedCheckouts(): Promise<void> {
+    logger.info('Starting Abandoned Checkouts Cleanup...');
+    const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
+
+    const abandonedOrders = await Order.findAll({
+      where: {
+        status: 'pending_payment',
+        createdAt: { [Op.lt]: thirtyMinutesAgo },
+      },
+    });
+
+    if (abandonedOrders.length === 0) {
+      logger.info('No abandoned checkouts to clean up.');
+      return;
+    }
+
+    logger.info(`Found ${abandonedOrders.length} abandoned orders to clean up.`);
+
+    for (const order of abandonedOrders) {
+      try {
+        await sequelize.transaction(async (t) => {
+          await order.update({ status: 'cancelled' }, { transaction: t });
+          await InventoryReservation.update(
+            { status: 'released' },
+            { where: { order_id: order.id }, transaction: t }
+          );
+        });
+
+        logger.info(`Abandoned order ${order.id} marked as cancelled and reservations released.`);
+
+        // Void open sale in Lightspeed if one was created
+        if (order.lightspeed_sale_id) {
+          const saleId = order.lightspeed_sale_id;
+          const readOnly = await LightspeedService.isReadOnlyMode();
+          const isMock = saleId.startsWith('mock-sale-');
+
+          if (!readOnly && !isMock) {
+            try {
+              await LightspeedService.makeRequest(`Sale/${saleId}.json`, {
+                method: 'PUT',
+                body: JSON.stringify({ voided: true }),
+              });
+              logger.info(`Voided abandoned Lightspeed sale ${saleId} for order ${order.id}.`);
+            } catch (voidErr) {
+              logger.error(`Failed to void abandoned Lightspeed sale ${saleId}:`, voidErr);
+            }
+          }
+        }
+      } catch (err) {
+        logger.error(`Error cleaning up abandoned order ${order.id}:`, err);
+      }
+    }
   }
 }
 
