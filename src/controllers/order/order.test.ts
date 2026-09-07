@@ -101,6 +101,26 @@ describe('Order Controllers', () => {
       );
       expect(mockResponse.sendPaginationSuccess).toHaveBeenCalled();
     });
+
+    it('should filter orders by ticketNumber', async () => {
+      mockRequest.query = { ticketNumber: '210000000123' };
+
+      (Order.findAndCountAll as jest.Mock).mockResolvedValue({
+        count: 1,
+        rows: [{ id: 10, ticket_number: '210000000123', toJSON: () => ({ id: 10, ticket_number: '210000000123' }) }],
+      });
+
+      await getOrders(mockRequest as Request, mockResponse as Response);
+
+      expect(Order.findAndCountAll).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            ticket_number: '210000000123',
+          }),
+        })
+      );
+      expect(mockResponse.sendPaginationSuccess).toHaveBeenCalled();
+    });
   });
 
   describe('getOrder', () => {
@@ -156,6 +176,37 @@ describe('Order Controllers', () => {
       expect(mockResponse.sendSuccess).toHaveBeenCalledWith(
         mockResponse,
         expect.objectContaining({ order_uuid: validUUID })
+      );
+    });
+
+    it('should return an order when found by ticket_number', async () => {
+      mockRequest.params = { id: '210000000123' };
+
+      const mockOrder = {
+        id: 77,
+        order_uuid: 'uuid-77',
+        ticket_number: '210000000123',
+        status: 'synced',
+        items: [],
+        toJSON: function () {
+          return this;
+        },
+      };
+
+      (Order.findOne as jest.Mock)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(mockOrder);
+
+      await getOrder(mockRequest as Request, mockResponse as Response);
+
+      expect(Order.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { ticket_number: '210000000123' },
+        })
+      );
+      expect(mockResponse.sendSuccess).toHaveBeenCalledWith(
+        mockResponse,
+        expect.objectContaining({ ticket_number: '210000000123', ticketNumber: '210000000123' })
       );
     });
 

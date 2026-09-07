@@ -2699,10 +2699,10 @@ export class LightspeedService {
   }
 
   /**
-   * createOpenSale - creates an open sale on Lightspeed to calculate taxes and get a saleID.
+   * createOpenSale - creates an open sale on Lightspeed to calculate taxes and get a saleID and ticketNumber.
    * Mocks the response if read-only mode is active.
    */
-  public static async createOpenSale(salePayload: any): Promise<{ saleID: string; calcTotal: string; taxTotal: string }> {
+  public static async createOpenSale(salePayload: any): Promise<{ saleID: string; ticketNumber?: string; calcTotal: string; taxTotal: string }> {
     const readOnly = await this.isReadOnlyMode();
     if (readOnly) {
       logger.info('[READ-ONLY MODE] Intercepting createOpenSale to return locally calculated mock data.');
@@ -2723,6 +2723,7 @@ export class LightspeedService {
 
       return {
         saleID: `mock-sale-${crypto.randomBytes(8).toString('hex')}`,
+        ticketNumber: `mock-ticket-${Math.floor(100000 + Math.random() * 900000)}`,
         calcTotal: total.toFixed(2),
         taxTotal: tax.toFixed(2),
       };
@@ -2736,9 +2737,28 @@ export class LightspeedService {
 
     return {
       saleID: response.Sale.saleID.toString(),
+      ticketNumber: response.Sale.ticketNumber ? response.Sale.ticketNumber.toString() : undefined,
       calcTotal: response.Sale.calcTotal.toString(),
       taxTotal: response.Sale.taxTotal.toString(),
     };
+  }
+
+  /**
+   * getSale - retrieves a sale from Lightspeed POS by saleID, optionally loading relations.
+   */
+  public static async getSale(saleID: string, relations?: string[]): Promise<any> {
+    const isMock = saleID.startsWith('mock-sale-');
+    if (isMock) {
+      return {
+        Sale: {
+          saleID,
+          ticketNumber: `mock-ticket-${saleID.slice(-6)}`,
+          completed: true,
+        },
+      };
+    }
+    const query = relations && relations.length > 0 ? `?load_relations=${encodeURIComponent(JSON.stringify(relations))}` : '';
+    return this.makeRequest(`Sale/${saleID}.json${query}`);
   }
 
   /**
@@ -2754,6 +2774,7 @@ export class LightspeedService {
       return {
         Sale: {
           saleID,
+          ticketNumber: `mock-ticket-${Math.floor(100000 + Math.random() * 900000)}`,
           completed: true,
         },
       };

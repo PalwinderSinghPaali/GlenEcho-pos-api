@@ -7,7 +7,11 @@ import logger from '@/utils/logger';
 // Helper to format Order
 function formatOrder(order: any) {
   if (!order) return null;
-  return order.toJSON ? order.toJSON() : order;
+  const json = order.toJSON ? order.toJSON() : { ...order };
+  if (json.ticket_number && !json.ticketNumber) {
+    json.ticketNumber = json.ticket_number;
+  }
+  return json;
 }
 
 // 1. GET /orders - Get paginated, searchable, and filterable list of orders
@@ -21,6 +25,7 @@ export const getOrders = async (req: Request, res: Response) => {
 
     const status = req.query.status as string;
     const userId = req.query.userId ? Number(req.query.userId) : undefined;
+    const ticketNumber = (req.query.ticketNumber || req.query.ticket_number) as string;
 
     const where: any = {};
 
@@ -32,9 +37,15 @@ export const getOrders = async (req: Request, res: Response) => {
       where.user_id = userId;
     }
 
+    if (ticketNumber) {
+      where.ticket_number = ticketNumber;
+    }
+
     if (search) {
       where[Op.or] = [
         { tracking_number: { [Op.iLike]: `%${search}%` } },
+        { ticket_number: { [Op.iLike]: `%${search}%` } },
+        { lightspeed_sale_id: { [Op.iLike]: `%${search}%` } },
         { carrier: { [Op.iLike]: `%${search}%` } },
         { 'shipping_address.firstName': { [Op.iLike]: `%${search}%` } },
         { 'shipping_address.lastName': { [Op.iLike]: `%${search}%` } },
@@ -47,7 +58,7 @@ export const getOrders = async (req: Request, res: Response) => {
         where[Op.or].push({ order_uuid: { [Op.eq]: search } });
       } else {
         const searchNum = Number(search);
-        if (!isNaN(searchNum)) {
+        if (!isNaN(searchNum) && Number.isInteger(searchNum) && searchNum > 0 && searchNum <= 2147483647) {
           where[Op.or].push({ id: { [Op.eq]: searchNum } });
         }
       }
@@ -77,7 +88,7 @@ export const getOrders = async (req: Request, res: Response) => {
   }
 };
 
-// 2. GET /orders/:id - Get a single order with items and product details (supports integer id and order_uuid)
+// 2. GET /orders/:id - Get a single order with items and product details (supports integer id, order_uuid, and ticket_number)
 export const getOrder = async (req: Request, res: Response) => {
   try {
     const id = req.params.id;
@@ -94,7 +105,7 @@ export const getOrder = async (req: Request, res: Response) => {
       queryWhere.id = idNum;
     }
 
-    const order = await Order.findOne({
+    let order = await Order.findOne({
       where: queryWhere,
       include: [
         {
@@ -105,6 +116,21 @@ export const getOrder = async (req: Request, res: Response) => {
         }
       ],
     });
+
+    // If not found by primary key ID and query was not a UUID, attempt lookup by ticket_number
+    if (!order && !isUUID) {
+      order = await Order.findOne({
+        where: { ticket_number: id },
+        include: [
+          {
+            model: OrderItem,
+            as: 'items',
+            required: false,
+            include: [{ model: Product, as: 'product', required: false }]
+          }
+        ],
+      });
+    }
 
     if (!order) {
       return res.sendError(res, 'ERR_ORDER_NOT_FOUND', { error: 'Order not found.' });
@@ -136,11 +162,19 @@ export const updateOrder = async (req: Request, res: Response) => {
       queryWhere.id = idNum;
     }
 
-    const order = await Order.findOne({
+    let order = await Order.findOne({
       where: queryWhere,
       lock: localTransaction.LOCK.UPDATE,
       transaction: localTransaction,
     });
+
+    if (!order && !isUUID) {
+      order = await Order.findOne({
+        where: { ticket_number: id },
+        lock: localTransaction.LOCK.UPDATE,
+        transaction: localTransaction,
+      });
+    }
 
     if (!order) {
       await localTransaction.rollback();
@@ -249,11 +283,19 @@ export const deleteOrder = async (req: Request, res: Response) => {
       queryWhere.id = idNum;
     }
 
-    const order = await Order.findOne({
+    let order = await Order.findOne({
       where: queryWhere,
       lock: localTransaction.LOCK.UPDATE,
       transaction: localTransaction,
     });
+
+    if (!order && !isUUID) {
+      order = await Order.findOne({
+        where: { ticket_number: id },
+        lock: localTransaction.LOCK.UPDATE,
+        transaction: localTransaction,
+      });
+    }
 
     if (!order) {
       await localTransaction.rollback();

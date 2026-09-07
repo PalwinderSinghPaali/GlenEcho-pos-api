@@ -229,11 +229,12 @@ export const createPaymentIntent = async (req: Request, res: Response) => {
       },
     });
 
-    // Two-Phase Write: Update local Order with real calcTotal and saleID
+    // Two-Phase Write: Update local Order with real calcTotal, saleID, and ticketNumber
     await createdOrder.update({
       total_amount: parseFloat(openSale.calcTotal),
       tax_amount: parseFloat(openSale.taxTotal),
       lightspeed_sale_id: openSale.saleID,
+      ticket_number: openSale.ticketNumber || null,
       stripe_payment_intent: paymentIntent.id,
     });
 
@@ -241,6 +242,7 @@ export const createPaymentIntent = async (req: Request, res: Response) => {
       clientSecret: paymentIntent.client_secret,
       orderId: createdOrder.order_uuid,
       id: createdOrder.id,
+      ticketNumber: openSale.ticketNumber || null,
       total: openSale.calcTotal,
     });
 

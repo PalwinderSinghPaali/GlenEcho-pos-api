@@ -18,6 +18,7 @@ import {
   ProductVendor,
   Shop,
   LightspeedEntityMap,
+  InventoryReservation,
 } from '@/database/models';
 import { LightspeedService } from '@/services/lightspeed';
 
@@ -31,12 +32,12 @@ import { LightspeedService } from '@/services/lightspeed';
  */
 async function formatProduct(product: Product, syncInfoMap?: Map<string, any>) {
   if (!product) return null;
-  const json = product.toJSON();
+  const json = typeof (product as any).toJSON === 'function' ? (product as any).toJSON() : { ...product };
 
   let syncInfo = null;
   if (syncInfoMap) {
-    syncInfo = syncInfoMap.get(product.lightspeed_item_id) || null;
-  } else {
+    syncInfo = (product.lightspeed_item_id ? syncInfoMap.get(product.lightspeed_item_id) : null) || null;
+  } else if (product.lightspeed_item_id) {
     const dbMap = await LightspeedEntityMap.findOne({
       where: {
         entity_type: 'product',
@@ -2966,9 +2967,170 @@ export const searchProducts = async (req: Request, res: Response) => {
   }
 };
 
+/**
+ * Quick batch stock check for multiple products.
+ * Accepts comma-separated product IDs (e.g. ?ids=1,2,3 or ?productIds=1,2,3).
+ * Returns current available stock quantity and boolean inStock status for each product.
+ */
+export const getProductsStock = async (req: Request, res: Response) => {
+  try {
+    const rawIds = String(req.query.ids || req.query.productIds || req.query.id || '').trim();
+
+    if (!rawIds) {
+      return res.sendError(res, 'ERR_VALIDATION_FAILED', {
+        error: 'Missing required query parameter "ids". Example: ?ids=1,2,3',
+      });
+    }
+
+    const idList = rawIds
+      .split(',')
+      .map((s) => Number(s.trim()))
+      .filter((n) => !isNaN(n) && n > 0);
+
+    if (idList.length === 0) {
+      return res.sendError(res, 'ERR_VALIDATION_FAILED', {
+        error: 'No valid numeric product IDs provided.',
+      });
+    }
+
+    const shopId = Number(req.query.shopId) || 1;
+
+    // 1. Fetch complete products and their associations in a single query
+    const products = await Product.findAll({
+      where: {
+        id: { [Op.in]: idList },
+      },
+      include: [
+        { model: Category, as: 'category' },
+        { model: Brand, as: 'brand' },
+        { model: ProductMatrix, as: 'matrix' },
+        { model: Tag, as: 'tags', through: { attributes: [] } },
+        { model: ProductImage, as: 'images' },
+        {
+          model: ProductInventory,
+          as: 'inventories',
+          include: [{ model: Shop, as: 'shop' }],
+        },
+        {
+          model: ProductVendor,
+          as: 'productVendors',
+          include: [{ model: Vendor, as: 'vendor' }],
+        },
+      ],
+    });
+
+    // 2. Batch load sync info for products
+    const itemIds = products.map((p) => p.lightspeed_item_id).filter(Boolean);
+    const entityMaps =
+      itemIds.length > 0
+        ? await LightspeedEntityMap.findAll({
+            where: {
+              entity_type: 'product',
+              lightspeed_id: { [Op.in]: itemIds },
+            },
+          })
+        : [];
+
+    const syncInfoMap = new Map<string, any>();
+    entityMaps.forEach((em) => {
+      syncInfoMap.set(em.lightspeed_id, {
+        entity_map_id: em.id,
+        lightspeed_id: em.lightspeed_id,
+        local_id: em.local_id,
+        last_sync: em.last_sync,
+        hash: em.hash,
+      });
+    });
+
+    // 3. Fetch live QOH from Lightspeed POS in parallel
+    const liveQohEntries = await Promise.all(
+      products.map(async (product: any) => {
+        let liveQoh = 0;
+        if (product.lightspeed_item_id) {
+          try {
+            liveQoh = await LightspeedService.getLiveQoh(product.lightspeed_item_id, shopId);
+          } catch (err) {
+            logger.warn(
+              `Failed to fetch live POS QOH for product ${product.id} (LS Item ${product.lightspeed_item_id}):`,
+              err
+            );
+          }
+        } else {
+          // If product is not linked to Lightspeed POS, use local stock
+          const inv = product.inventories?.find((i: any) => i.shop_id === shopId) || product.inventories?.[0];
+          liveQoh = inv?.qoh ?? product.qoh ?? 0;
+        }
+
+        return [product.id, liveQoh] as const;
+      })
+    );
+    const liveQohMap = new Map<number, number>(liveQohEntries);
+
+    // 4. Fetch active reservations in a single query
+    const reservations = (await InventoryReservation.findAll({
+      where: {
+        product_id: { [Op.in]: idList },
+        status: 'active',
+        expires_at: { [Op.gt]: new Date() },
+      },
+      attributes: [
+        'product_id',
+        [sequelize.fn('SUM', sequelize.col('quantity')), 'total_reserved'],
+      ],
+      group: ['product_id'],
+      raw: true,
+    })) as any[];
+
+    const reservedMap = new Map<number, number>();
+    for (const r of reservations) {
+      reservedMap.set(Number(r.product_id), Number(r.total_reserved) || 0);
+    }
+
+    const productMap = new Map<number, any>();
+    for (const p of products) {
+      productMap.set(p.id, p);
+    }
+
+    // 5. Construct response array with complete product details directly
+    const result = await Promise.all(
+      idList.map(async (id) => {
+        const product = productMap.get(id);
+
+        if (!product) {
+          return {
+            id,
+            productId: id,
+            stockQty: 0,
+            inStock: false,
+          };
+        }
+
+        const formatted = await formatProduct(product, syncInfoMap);
+        const qoh = product.archived ? 0 : (liveQohMap.get(id) ?? 0);
+        const reserved = reservedMap.get(id) || 0;
+        const stockQty = product.archived ? 0 : Math.max(0, qoh - reserved);
+
+        return {
+          ...formatted,
+          productId: product.id,
+          qoh: stockQty,
+          stockQty,
+          inStock: stockQty > 0,
+        };
+      })
+    );
+
+    return res.sendSuccess(res, result);
+  } catch (error: any) {
+    logger.error('Error fetching products stock:', error);
+    return res.sendError(res, error.message || 'ERR_INTERNAL_SERVER_ERROR');
+  }
+};
+
 export default {
   getProducts,
   getProduct,
+  getProductsStock,
   createProduct,
   updateProduct,
   deleteProduct,

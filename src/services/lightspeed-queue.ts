@@ -885,8 +885,9 @@ export class LightspeedQueue {
     }
 
     // 3. Complete Sale in Lightspeed POS
+    let completedSaleResponse: any = null;
     try {
-      await LightspeedService.completeSale(lightspeedSaleId, amount, stripePaymentIntentId);
+      completedSaleResponse = await LightspeedService.completeSale(lightspeedSaleId, amount, stripePaymentIntentId);
     } catch (lsErr: any) {
       logger.error(`Failed to complete Lightspeed Sale ${lightspeedSaleId}:`, lsErr);
       throw new Error(`Lightspeed completion failed: ${lsErr.message}`);
@@ -929,7 +930,11 @@ export class LightspeedQueue {
 
     // 5. Update local Order & Reservations
     await sequelize.transaction(async (t) => {
-      await order.update({ status: 'synced' }, { transaction: t });
+      const updateData: any = { status: 'synced' };
+      if (!order.ticket_number && completedSaleResponse?.Sale?.ticketNumber) {
+        updateData.ticket_number = completedSaleResponse.Sale.ticketNumber.toString();
+      }
+      await order.update(updateData, { transaction: t });
       await InventoryReservation.update(
         { status: 'consumed' },
         { where: { order_id: orderId }, transaction: t }
@@ -1009,6 +1014,10 @@ export class LightspeedQueue {
         const response = await LightspeedService.makeRequest(`Sale/${saleId}.json?load_relations=["ShipTo"]`);
         const sale = response.Sale;
         if (!sale) continue;
+
+        if (!order.ticket_number && sale.ticketNumber) {
+          await order.update({ ticket_number: sale.ticketNumber.toString() });
+        }
 
         const shipTo = sale.ShipTo;
         if (shipTo && (shipTo.shipped === 'true' || shipTo.shipped === true)) {

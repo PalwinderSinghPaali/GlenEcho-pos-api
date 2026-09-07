@@ -3,6 +3,7 @@ import multer from 'multer';
 import {
   getProducts,
   getProduct,
+  getProductsStock,
   createProduct,
   updateProduct,
   deleteProduct,
@@ -58,7 +59,10 @@ router.get('/search', searchProducts);
 // 3. Bulk import products via CSV
 router.post('/import-csv', handleBulkImportUpload, uploadProductsCSV);
 
-// 4. Retrieve a single product's detail
+// 4. Batch stock check for products (comma-separated ?ids=1,2,3)
+router.get('/stock', getProductsStock);
+
+// 5. Retrieve a single product's detail
 router.get('/:id', getProduct);
 
 // 4. Create a product locally

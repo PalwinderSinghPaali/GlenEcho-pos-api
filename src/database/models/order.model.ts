@@ -13,6 +13,7 @@ export interface OrderAttributes {
   stripe_payment_intent?: string | null;
   lightspeed_sale_id?: string | null;
   lightspeed_ship_to_id?: string | null;
+  ticket_number?: string | null;
   shipped_locally: boolean;
   shipped_at?: Date | null;
   carrier?: string | null;
@@ -35,6 +36,7 @@ export type OrderCreationAttributes = Optional<
   | 'stripe_payment_intent'
   | 'lightspeed_sale_id'
   | 'lightspeed_ship_to_id'
+  | 'ticket_number'
   | 'shipped_locally'
   | 'shipped_at'
   | 'carrier'
@@ -56,6 +58,7 @@ export class Order extends Model<OrderAttributes, OrderCreationAttributes> imple
   declare stripe_payment_intent: string | null;
   declare lightspeed_sale_id: string | null;
   declare lightspeed_ship_to_id: string | null;
+  declare ticket_number: string | null;
   declare shipped_locally: boolean;
   declare shipped_at: Date | null;
   declare carrier: string | null;
@@ -123,6 +126,10 @@ Order.init(
       allowNull: true,
     },
     lightspeed_ship_to_id: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    ticket_number: {
       type: DataTypes.STRING,
       allowNull: true,
     },

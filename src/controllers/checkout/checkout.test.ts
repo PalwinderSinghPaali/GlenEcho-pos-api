@@ -186,6 +186,7 @@ describe('Checkout Controller', () => {
       (LightspeedService.resolveActiveEmployee as jest.Mock).mockResolvedValue('1');
       (LightspeedService.createOpenSale as jest.Mock).mockResolvedValue({
         saleID: 'ls_sale_555',
+        ticketNumber: '210000000555',
         calcTotal: '113.00',
         taxTotal: '13.00',
       });
@@ -231,6 +232,7 @@ describe('Checkout Controller', () => {
           total_amount: 113.0,
           tax_amount: 13.0,
           lightspeed_sale_id: 'ls_sale_555',
+          ticket_number: '210000000555',
           stripe_payment_intent: 'pi_test_123',
         })
       );
@@ -240,6 +242,7 @@ describe('Checkout Controller', () => {
           clientSecret: 'pi_test_123_secret',
           orderId: 'mock-order-uuid-1234',
           id: 12,
+          ticketNumber: '210000000555',
           total: '113.00',
         })
       );
