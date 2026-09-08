@@ -19,6 +19,7 @@ import {
   Shop,
   LightspeedEntityMap,
   InventoryReservation,
+  ProductSalesStats,
 } from '@/database/models';
 import { LightspeedService } from '@/services/lightspeed';
 
@@ -91,7 +92,7 @@ async function formatProduct(product: Product, syncInfoMap?: Map<string, any>) {
         }
       : null,
     displayNote: product.display_note ? 'true' : 'false',
-    createTime: product.createdAt,
+    createTime: (product as any).lightspeed_create_time || product.createdAt,
     timeStamp: product.updatedAt,
     lightspeed_sync_info: syncInfo,
   };
@@ -398,9 +399,17 @@ export const getProducts = async (req: Request, res: Response) => {
       where.price = { ...(where.price || {}), [Op.lte]: maxPrice };
     }
 
+    let orderClause: any = [[sort, order]];
+    if (sort === 'createdAt' || sort === 'created_at' || sort === 'recently_added') {
+      orderClause = [
+        ['lightspeed_create_time', order],
+        ['createdAt', order],
+      ];
+    }
+
     const queryOptions: any = {
       where,
-      order: [[sort, order]],
+      order: orderClause,
       include: [
         { model: Category, as: 'category' },
         { model: Brand, as: 'brand' },
@@ -3127,10 +3136,163 @@ export const getProductsStock = async (req: Request, res: Response) => {
   }
 };
 
+/**
+ * Helper to fetch full product models with associations based on an ordered array of IDs,
+ * strictly preserving the ranked ordering.
+ */
+async function fetchProductsByIdsInOrder(ids: number[], commonInclude: any[]) {
+  if (!ids || ids.length === 0) return [];
+  const products = await Product.findAll({
+    where: { id: { [Op.in]: ids } },
+    include: commonInclude,
+  });
+  const productMap = new Map<number, Product>();
+  products.forEach((p) => productMap.set(p.id, p));
+  return ids.map((id) => productMap.get(id)).filter(Boolean) as Product[];
+}
+
+/**
+ * 11. GET /product/landing-sections
+ * Returns bundled collections for the landing page:
+ * - recentlyAdded (ordered by Lightspeed create time, then createdAt)
+ * - topSelling (ordered by 30d/all-time POS units sold from product_sales_stats)
+ * - trending (ordered by 7d sales velocity / momentum from product_sales_stats)
+ * - popular (matrix products with variations, multi-image showcase, distinct from pure sales)
+ */
+export const getLandingPageSections = async (req: Request, res: Response) => {
+  try {
+    const limit = Math.min(20, Math.max(1, Number(req.query.limit) || 8));
+
+    const baseWhere: any = {
+      archived: false,
+      qoh: { [Op.gt]: 0 },
+    };
+
+    const commonInclude: any[] = [
+      { model: Category, as: 'category' },
+      { model: Brand, as: 'brand' },
+      { model: ProductMatrix, as: 'matrix' },
+      { model: ProductImage, as: 'images' },
+      {
+        model: ProductSalesStats,
+        as: 'salesStats',
+        required: false,
+      },
+    ];
+
+    // Priority expression: products with at least 1 image always come first
+    const hasImagePriority = sequelize.literal(
+      'CASE WHEN EXISTS (SELECT 1 FROM product_images WHERE product_images.product_id = "Product"."id") THEN 1 ELSE 0 END'
+    );
+
+    // 1. Recently Added IDs (Prioritizing products with images, ordered by Lightspeed create time)
+    const recentRows = await Product.findAll({
+      where: baseWhere,
+      attributes: ['id'],
+      order: [
+        [hasImagePriority, 'DESC'],
+        ['lightspeed_create_time', 'DESC'],
+        ['createdAt', 'DESC'],
+      ],
+      limit,
+      raw: true,
+    });
+    const recentIds = recentRows.map((r: any) => r.id);
+
+    // 2. Top Selling IDs (Prioritizing products with images, then 30d/all-time POS sales volume)
+    const topSellingRows = await Product.findAll({
+      where: baseWhere,
+      attributes: ['id'],
+      include: [
+        {
+          model: ProductSalesStats,
+          as: 'salesStats',
+          attributes: [],
+          required: false,
+        },
+      ],
+      order: [
+        [hasImagePriority, 'DESC'],
+        [sequelize.literal('COALESCE("salesStats"."units_sold_30d", 0)'), 'DESC'],
+        [sequelize.literal('COALESCE("salesStats"."units_sold_all_time", 0)'), 'DESC'],
+        ['qoh', 'DESC'],
+      ],
+      subQuery: false,
+      limit,
+      raw: true,
+    });
+    const topSellingIds = topSellingRows.map((r: any) => r.id);
+
+    // 3. Trending IDs (Prioritizing products with images, then 7-day velocity / discount depth)
+    const trendingRows = await Product.findAll({
+      where: baseWhere,
+      attributes: ['id'],
+      include: [
+        {
+          model: ProductSalesStats,
+          as: 'salesStats',
+          attributes: [],
+          required: false,
+        },
+      ],
+      order: [
+        [hasImagePriority, 'DESC'],
+        [sequelize.literal('COALESCE("salesStats"."units_sold_7d", 0)'), 'DESC'],
+        [sequelize.literal('COALESCE("Product"."msrp" - "Product"."price", 0)'), 'DESC'],
+        ['qoh', 'DESC'],
+      ],
+      subQuery: false,
+      limit,
+      raw: true,
+    });
+    const trendingIds = trendingRows.map((r: any) => r.id);
+
+    // 4. Popular IDs (Prioritizing products with images, then matrix showcase variants)
+    const popularRows = await Product.findAll({
+      where: baseWhere,
+      attributes: ['id'],
+      order: [
+        [hasImagePriority, 'DESC'],
+        [sequelize.literal('CASE WHEN "Product"."product_matrix_id" IS NOT NULL THEN 1 ELSE 0 END'), 'DESC'],
+        ['qoh', 'DESC'],
+      ],
+      limit,
+      raw: true,
+    });
+    const popularIds = popularRows.map((r: any) => r.id);
+
+    // Fetch full products with associations in parallel, preserving ranked order
+    const [recentlyAddedProducts, topSellingProducts, trendingProducts, popularProducts] = await Promise.all([
+      fetchProductsByIdsInOrder(recentIds, commonInclude),
+      fetchProductsByIdsInOrder(topSellingIds, commonInclude),
+      fetchProductsByIdsInOrder(trendingIds, commonInclude),
+      fetchProductsByIdsInOrder(popularIds, commonInclude),
+    ]);
+
+    const [recentlyAdded, topSelling, trending, popular] = await Promise.all([
+      Promise.all(recentlyAddedProducts.map((p) => formatProduct(p))),
+      Promise.all(topSellingProducts.map((p) => formatProduct(p))),
+      Promise.all(trendingProducts.map((p) => formatProduct(p))),
+      Promise.all(popularProducts.map((p) => formatProduct(p))),
+    ]);
+
+    return res.sendSuccess(res, {
+      recentlyAdded,
+      topSelling,
+      trending,
+      popular,
+    });
+  } catch (error: any) {
+    logger.error('Error fetching landing page sections:', error);
+    return res.sendError(res, error.message || 'ERR_INTERNAL_SERVER_ERROR');
+  }
+};
+
 export default {
   getProducts,
   getProduct,
   getProductsStock,
+  getLandingPageSections,
   createProduct,
   updateProduct,
   deleteProduct,

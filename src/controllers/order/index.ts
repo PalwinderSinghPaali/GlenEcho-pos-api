@@ -1,16 +1,81 @@
 import { Request, Response } from 'express';
 import { Op } from 'sequelize';
-import { Order, OrderItem, Product, InventoryReservation, LightspeedSyncJob } from '@/database/models';
+import {
+  Order,
+  OrderItem,
+  Product,
+  InventoryReservation,
+  LightspeedSyncJob,
+  User,
+  Customer,
+} from '@/database/models';
 import sequelize from '@/database/connection';
 import logger from '@/utils/logger';
 
 // Helper to format Order
-function formatOrder(order: any) {
+function formatOrder(order: any, customerMap?: Map<string, any>) {
   if (!order) return null;
   const json = order.toJSON ? order.toJSON() : { ...order };
   if (json.ticket_number && !json.ticketNumber) {
     json.ticketNumber = json.ticket_number;
   }
+
+  // Sanitize user object (never expose passwords or reset tokens)
+  if (json.user) {
+    delete json.user.password;
+    delete json.user.reset_password_token;
+    delete json.user.reset_password_expires;
+  }
+
+  // Resolve customer information
+  const customerEmail =
+    json.shipping_address?.email ||
+    json.billing_address?.email ||
+    json.user?.email ||
+    null;
+
+  const matchedCustomer = customerEmail && customerMap ? customerMap.get(customerEmail.toLowerCase()) : null;
+
+  json.customer = matchedCustomer
+    ? {
+        id: matchedCustomer.id,
+        lightspeed_customer_id: matchedCustomer.lightspeed_customer_id,
+        first_name: matchedCustomer.first_name || json.shipping_address?.firstName || json.user?.first_name || '',
+        last_name: matchedCustomer.last_name || json.shipping_address?.lastName || json.user?.last_name || '',
+        email: matchedCustomer.email_primary || customerEmail,
+        phone:
+          matchedCustomer.phone_mobile ||
+          matchedCustomer.phone_home ||
+          matchedCustomer.phone_work ||
+          json.shipping_address?.phone ||
+          json.billing_address?.phone ||
+          null,
+        company: matchedCustomer.company || null,
+        address_1: matchedCustomer.address_1 || json.shipping_address?.address1 || null,
+        address_2: matchedCustomer.address_2 || json.shipping_address?.address2 || null,
+        city: matchedCustomer.city || json.shipping_address?.city || null,
+        state: matchedCustomer.state || json.shipping_address?.state || null,
+        zip: matchedCustomer.zip || json.shipping_address?.zip || null,
+        country: matchedCustomer.country || json.shipping_address?.country || null,
+      }
+    : (json.shipping_address || json.billing_address || json.user
+      ? {
+          id: null,
+          lightspeed_customer_id: null,
+          first_name: json.shipping_address?.firstName || json.billing_address?.firstName || json.user?.first_name || '',
+          last_name: json.shipping_address?.lastName || json.billing_address?.lastName || json.user?.last_name || '',
+          email: customerEmail,
+          phone: json.shipping_address?.phone || json.billing_address?.phone || null,
+          company: null,
+          address_1: json.shipping_address?.address1 || json.billing_address?.address1 || null,
+          address_2: json.shipping_address?.address2 || json.billing_address?.address2 || null,
+          city: json.shipping_address?.city || json.billing_address?.city || null,
+          state: json.shipping_address?.state || json.billing_address?.state || null,
+          zip: json.shipping_address?.zip || json.billing_address?.zip || null,
+          country: json.shipping_address?.country || json.billing_address?.country || null,
+        }
+      : null);
+
   return json;
 }
 
@@ -49,9 +114,33 @@ export const getOrders = async (req: Request, res: Response) => {
         { carrier: { [Op.iLike]: `%${search}%` } },
         { 'shipping_address.firstName': { [Op.iLike]: `%${search}%` } },
         { 'shipping_address.lastName': { [Op.iLike]: `%${search}%` } },
+        { 'shipping_address.email': { [Op.iLike]: `%${search}%` } },
+        { 'shipping_address.phone': { [Op.iLike]: `%${search}%` } },
         { 'billing_address.firstName': { [Op.iLike]: `%${search}%` } },
         { 'billing_address.lastName': { [Op.iLike]: `%${search}%` } },
+        { 'billing_address.email': { [Op.iLike]: `%${search}%` } },
+        { 'billing_address.phone': { [Op.iLike]: `%${search}%` } },
       ];
+
+      // Check if search matches user accounts
+      try {
+        const matchingUsers = await User.findAll({
+          where: {
+            [Op.or]: [
+              { first_name: { [Op.iLike]: `%${search}%` } },
+              { last_name: { [Op.iLike]: `%${search}%` } },
+              { email: { [Op.iLike]: `%${search}%` } },
+            ],
+          },
+          attributes: ['id'],
+        });
+        const userIds = matchingUsers.map((u: any) => u.id);
+        if (userIds.length > 0) {
+          where[Op.or].push({ user_id: { [Op.in]: userIds } });
+        }
+      } catch (userSearchErr) {
+        logger.debug('User search check skipped:', userSearchErr);
+      }
       
       const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(search);
       if (isUUID) {
@@ -69,6 +158,12 @@ export const getOrders = async (req: Request, res: Response) => {
       order: [['createdAt', sort]],
       include: [
         {
+          model: User,
+          as: 'user',
+          required: false,
+          attributes: ['id', 'email', 'first_name', 'last_name', 'role', 'is_active', 'createdAt'],
+        },
+        {
           model: OrderItem,
           as: 'items',
           required: false,
@@ -80,7 +175,33 @@ export const getOrders = async (req: Request, res: Response) => {
       distinct: true,
     });
 
-    const formattedRows = rows.map((r: any) => formatOrder(r));
+    // Batch resolve Customers by email
+    const emails = rows
+      .map((r: any) => r.shipping_address?.email || r.billing_address?.email || r.user?.email)
+      .filter(Boolean)
+      .map((e: string) => e.toLowerCase());
+
+    const customerMap = new Map<string, any>();
+    if (emails.length > 0) {
+      try {
+        const customers = await Customer.findAll({
+          where: {
+            email_primary: {
+              [Op.in]: emails,
+            },
+          },
+        });
+        customers.forEach((c: any) => {
+          if (c.email_primary) {
+            customerMap.set(c.email_primary.toLowerCase(), c.toJSON ? c.toJSON() : c);
+          }
+        });
+      } catch (custErr) {
+        logger.warn('Failed to load customers for orders batch:', custErr);
+      }
+    }
+
+    const formattedRows = rows.map((r: any) => formatOrder(r, customerMap));
     return res.sendPaginationSuccess(res, formattedRows, count);
   } catch (error: unknown) {
     logger.error('Error fetching orders:', error);
@@ -88,7 +209,7 @@ export const getOrders = async (req: Request, res: Response) => {
   }
 };
 
-// 2. GET /orders/:id - Get a single order with items and product details (supports integer id, order_uuid, and ticket_number)
+// 2. GET /orders/:id - Get a single order with items, user, and customer details
 export const getOrder = async (req: Request, res: Response) => {
   try {
     const id = req.params.id;
@@ -105,30 +226,31 @@ export const getOrder = async (req: Request, res: Response) => {
       queryWhere.id = idNum;
     }
 
+    const orderInclude = [
+      {
+        model: User,
+        as: 'user',
+        required: false,
+        attributes: ['id', 'email', 'first_name', 'last_name', 'role', 'is_active', 'createdAt'],
+      },
+      {
+        model: OrderItem,
+        as: 'items',
+        required: false,
+        include: [{ model: Product, as: 'product', required: false }]
+      }
+    ];
+
     let order = await Order.findOne({
       where: queryWhere,
-      include: [
-        {
-          model: OrderItem,
-          as: 'items',
-          required: false,
-          include: [{ model: Product, as: 'product', required: false }]
-        }
-      ],
+      include: orderInclude,
     });
 
     // If not found by primary key ID and query was not a UUID, attempt lookup by ticket_number
     if (!order && !isUUID) {
       order = await Order.findOne({
         where: { ticket_number: id },
-        include: [
-          {
-            model: OrderItem,
-            as: 'items',
-            required: false,
-            include: [{ model: Product, as: 'product', required: false }]
-          }
-        ],
+        include: orderInclude,
       });
     }
 
@@ -136,7 +258,28 @@ export const getOrder = async (req: Request, res: Response) => {
       return res.sendError(res, 'ERR_ORDER_NOT_FOUND', { error: 'Order not found.' });
     }
 
-    return res.sendSuccess(res, formatOrder(order));
+    // Resolve customer information for single order
+    const customerEmail =
+      order.shipping_address?.email ||
+      order.billing_address?.email ||
+      (order as any).user?.email ||
+      null;
+
+    const customerMap = new Map<string, any>();
+    if (customerEmail) {
+      try {
+        const customerRecord = await Customer.findOne({
+          where: { email_primary: { [Op.iLike]: customerEmail } },
+        });
+        if (customerRecord && customerRecord.email_primary) {
+          customerMap.set(customerRecord.email_primary.toLowerCase(), customerRecord.toJSON ? customerRecord.toJSON() : customerRecord);
+        }
+      } catch (custErr) {
+        logger.warn('Failed to load customer for single order:', custErr);
+      }
+    }
+
+    return res.sendSuccess(res, formatOrder(order, customerMap));
   } catch (error: unknown) {
     logger.error('Error fetching order details:', error);
     return res.sendError(res, 'ERR_INTERNAL_SERVER_ERROR', { error: (error as Error).message });

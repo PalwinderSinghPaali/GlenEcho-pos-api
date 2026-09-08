@@ -104,8 +104,20 @@ export const createPaymentIntent = async (req: Request, res: Response) => {
         subtotal_amount: subtotal,
         tax_amount: tax,
         shipping_amount: 0,
-        shipping_address: shippingAddress || {},
-        billing_address: billingAddress || {},
+        shipping_address: {
+          firstName,
+          lastName,
+          email,
+          phone,
+          ...(shippingAddress || {}),
+        },
+        billing_address: {
+          firstName,
+          lastName,
+          email,
+          phone,
+          ...(billingAddress || {}),
+        },
         shipped_locally: false,
       },
       { transaction: localTransaction }

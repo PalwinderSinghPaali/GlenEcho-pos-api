@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { getOrders, getOrder, updateOrder, deleteOrder } from './index';
-import { Order, InventoryReservation, LightspeedSyncJob } from '@/database/models';
+import { Order, InventoryReservation, LightspeedSyncJob, User, Customer } from '@/database/models';
 import sequelize from '@/database/connection';
 
 jest.mock('@/database/models');
@@ -42,6 +42,9 @@ describe('Order Controllers', () => {
     Order.findAndCountAll = jest.fn();
     Order.findOne = jest.fn();
     Order.findByPk = jest.fn();
+    User.findAll = jest.fn().mockResolvedValue([]);
+    Customer.findAll = jest.fn().mockResolvedValue([]);
+    Customer.findOne = jest.fn().mockResolvedValue(null);
     InventoryReservation.update = jest.fn();
     LightspeedSyncJob.create = jest.fn();
   });
@@ -121,6 +124,84 @@ describe('Order Controllers', () => {
       );
       expect(mockResponse.sendPaginationSuccess).toHaveBeenCalled();
     });
+
+    it('should return customer information and sanitized user data in getOrders', async () => {
+      mockRequest.query = { page: '1', limit: '10' };
+
+      const mockOrder = {
+        id: 1,
+        order_uuid: 'uuid-1',
+        status: 'paid',
+        user_id: 10,
+        shipping_address: {
+          firstName: 'Ankita',
+          lastName: 'Dhiman',
+          email: 'ankita@example.com',
+          phone: '1234567890',
+          city: 'Toronto',
+        },
+        user: {
+          id: 10,
+          email: 'ankita@example.com',
+          first_name: 'Ankita',
+          last_name: 'Dhiman',
+          password: 'hashedpassword',
+          role: 1,
+        },
+        toJSON: function () {
+          return { ...this };
+        },
+      };
+
+      (Order.findAndCountAll as jest.Mock).mockResolvedValue({
+        count: 1,
+        rows: [mockOrder],
+      });
+
+      (Customer.findAll as jest.Mock).mockResolvedValue([
+        {
+          id: 55,
+          lightspeed_customer_id: 'ls-cust-55',
+          first_name: 'Ankita',
+          last_name: 'Dhiman',
+          email_primary: 'ankita@example.com',
+          phone_mobile: '1234567890',
+          city: 'Toronto',
+          toJSON: () => ({
+            id: 55,
+            lightspeed_customer_id: 'ls-cust-55',
+            first_name: 'Ankita',
+            last_name: 'Dhiman',
+            email_primary: 'ankita@example.com',
+            phone_mobile: '1234567890',
+            city: 'Toronto',
+          }),
+        },
+      ]);
+
+      await getOrders(mockRequest as Request, mockResponse as Response);
+
+      expect(mockResponse.sendPaginationSuccess).toHaveBeenCalledWith(
+        mockResponse,
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 1,
+            user: expect.objectContaining({
+              id: 10,
+              email: 'ankita@example.com',
+              first_name: 'Ankita',
+            }),
+            customer: expect.objectContaining({
+              id: 55,
+              lightspeed_customer_id: 'ls-cust-55',
+              first_name: 'Ankita',
+              email: 'ankita@example.com',
+            }),
+          }),
+        ]),
+        1
+      );
+    });
   });
 
   describe('getOrder', () => {
@@ -148,6 +229,74 @@ describe('Order Controllers', () => {
       expect(mockResponse.sendSuccess).toHaveBeenCalledWith(
         mockResponse,
         expect.objectContaining({ id: 5 })
+      );
+    });
+
+    it('should return an order with user and customer details', async () => {
+      mockRequest.params = { id: '7' };
+
+      const mockOrder = {
+        id: 7,
+        order_uuid: 'uuid-7',
+        status: 'paid',
+        user_id: 12,
+        shipping_address: {
+          firstName: 'John',
+          lastName: 'Doe',
+          email: 'john.doe@example.com',
+          phone: '9876543210',
+          city: 'Richmond Hill',
+        },
+        user: {
+          id: 12,
+          email: 'john.doe@example.com',
+          first_name: 'John',
+          last_name: 'Doe',
+          role: 2,
+        },
+        toJSON: function () {
+          return { ...this };
+        },
+      };
+
+      (Order.findOne as jest.Mock).mockResolvedValue(mockOrder);
+      (Customer.findOne as jest.Mock).mockResolvedValue({
+        id: 99,
+        lightspeed_customer_id: 'ls-cust-99',
+        first_name: 'John',
+        last_name: 'Doe',
+        email_primary: 'john.doe@example.com',
+        phone_mobile: '9876543210',
+        city: 'Richmond Hill',
+        toJSON: () => ({
+          id: 99,
+          lightspeed_customer_id: 'ls-cust-99',
+          first_name: 'John',
+          last_name: 'Doe',
+          email_primary: 'john.doe@example.com',
+          phone_mobile: '9876543210',
+          city: 'Richmond Hill',
+        }),
+      });
+
+      await getOrder(mockRequest as Request, mockResponse as Response);
+
+      expect(mockResponse.sendSuccess).toHaveBeenCalledWith(
+        mockResponse,
+        expect.objectContaining({
+          id: 7,
+          user: expect.objectContaining({
+            id: 12,
+            email: 'john.doe@example.com',
+            first_name: 'John',
+          }),
+          customer: expect.objectContaining({
+            id: 99,
+            lightspeed_customer_id: 'ls-cust-99',
+            first_name: 'John',
+            email: 'john.doe@example.com',
+          }),
+        })
       );
     });
 

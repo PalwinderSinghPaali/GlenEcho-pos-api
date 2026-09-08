@@ -12,6 +12,7 @@ import {
   ProductImage,
 } from '@/database/models';
 import { LightspeedService } from '@/services/lightspeed';
+import { LightspeedQueue } from '@/services/lightspeed-queue';
 
 /**
  * Helper to recursively search for a file in a directory structure.
@@ -663,6 +664,48 @@ export const migrateImagePaths = async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error migrating image paths:', error);
+    return res.sendError(res, error.message || 'ERR_INTERNAL_SERVER_ERROR');
+  }
+};
+
+/**
+ * Triggers pulling and synchronizing POS sales data from Lightspeed.
+ * - Incremental poll by default (picks up from last cursor).
+ * - Supports historical backfill via ?backfill=true or ?days=365.
+ * - Supports ?immediate=true to execute synchronously instead of queuing.
+ */
+export const triggerSalesSync = async (req: Request, res: Response) => {
+  try {
+    const isImmediate = req.query.immediate === 'true' || req.body?.immediate === true;
+    const backfill = req.query.backfill === 'true' || req.body?.backfill === true;
+    const daysParam = req.query.days || req.body?.days;
+    const backfillDays = daysParam ? Number(daysParam) : backfill ? 365 : undefined;
+
+    if (isImmediate) {
+      logger.info(`Manual synchronous POS sales sync initiated (backfillDays: ${backfillDays || 'cursor'})...`);
+      await LightspeedQueue.executePollPOSSales({ backfillDays });
+      return res.sendSuccess(res, {
+        message: 'POS sales synchronized successfully and sales metrics updated.',
+      });
+    }
+
+    // Queue the job via LightspeedQueue worker
+    const job = await LightspeedSyncJob.create({
+      job_type: 'POLL_POS_SALES',
+      payload: { backfillDays },
+      status: 'pending',
+      attempts: 0,
+      max_attempts: 3,
+      run_at: new Date(),
+    });
+
+    return res.sendSuccess(res, {
+      message: 'POS sales poll job queued successfully.',
+      jobId: job.id,
+      backfillDays: backfillDays || null,
+    });
+  } catch (error: any) {
+    logger.error('Error triggering sales sync:', error);
     return res.sendError(res, error.message || 'ERR_INTERNAL_SERVER_ERROR');
   }
 };
