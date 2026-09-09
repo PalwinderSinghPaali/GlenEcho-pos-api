@@ -7,6 +7,7 @@ import {
   getDashboard,
   retryJob,
   triggerBootstrap,
+  triggerSalesSync,
   getAuthUrl,
   authCallback,
   serveImage,
@@ -30,6 +31,8 @@ router.post('/images/migrate-paths', migrateImagePaths);
 router.get('/dashboard', getDashboard);
 router.post('/queue/retry/:jobId', retryJob);
 router.post('/sync/bootstrap', triggerBootstrap);
+router.post('/sync/sales', triggerSalesSync);
+router.get('/sync/sales', triggerSalesSync);
 
 // Read-only mode management (protects live Lightspeed POS from write operations)
 router.get('/read-only', getReadOnlyStatus);

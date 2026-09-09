@@ -33,6 +33,7 @@ export interface ProductAttributes {
   tsv_search: string | null;
   tax_class_id: string | null;
   tax_class_name: string | null;
+  lightspeed_create_time?: Date | null;
 }
 
 export type ProductCreationAttributes = Optional<
@@ -67,6 +68,7 @@ export type ProductCreationAttributes = Optional<
   | 'tsv_search'
   | 'tax_class_id'
   | 'tax_class_name'
+  | 'lightspeed_create_time'
 >;
 
 export class Product extends Model<ProductAttributes, ProductCreationAttributes> implements ProductAttributes {
@@ -101,6 +103,7 @@ export class Product extends Model<ProductAttributes, ProductCreationAttributes>
   declare tsv_search: string | null;
   declare tax_class_id: string | null;
   declare tax_class_name: string | null;
+  declare lightspeed_create_time: Date | null;
   declare readonly createdAt: Date;
   declare readonly updatedAt: Date;
 }
@@ -276,6 +279,10 @@ Product.init(
     },
     tax_class_name: {
       type: DataTypes.STRING,
+      allowNull: true,
+    },
+    lightspeed_create_time: {
+      type: DataTypes.DATE,
       allowNull: true,
     },
   },

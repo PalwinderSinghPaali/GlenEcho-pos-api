@@ -23,10 +23,12 @@ import currencyRateRouter from '@/router/currency-rate';
 import discountRouter from '@/router/discount';
 import customerTypeRouter from '@/router/customer-type';
 import taxCategoryRouter from '@/router/tax-category';
+import taxClassRouter from '@/router/tax-class';
 import checkoutRouter from '@/router/checkout';
 import orderRouter from '@/router/order';
 import registerRouter from '@/router/register';
 import employeeRouter from '@/router/employee';
+import dashboardRouter from '@/router/dashboard';
 import sequelize from '@/database/connection';
 
 // import { redisClient } from '@/cache/redis';
@@ -134,10 +136,12 @@ app.use(`${config.app.prefix}/${config.app.version}/currency-rate`, currencyRate
 app.use(`${config.app.prefix}/${config.app.version}/discount`, discountRouter);
 app.use(`${config.app.prefix}/${config.app.version}/customer-type`, customerTypeRouter);
 app.use(`${config.app.prefix}/${config.app.version}/tax-category`, taxCategoryRouter);
+app.use(`${config.app.prefix}/${config.app.version}/tax-class`, taxClassRouter);
 app.use(`${config.app.prefix}/${config.app.version}/checkout`, checkoutRouter);
 app.use(`${config.app.prefix}/${config.app.version}/orders`, orderRouter);
 app.use(`${config.app.prefix}/${config.app.version}/register`, registerRouter);
 app.use(`${config.app.prefix}/${config.app.version}/employee`, employeeRouter);
+app.use(`${config.app.prefix}/${config.app.version}/dashboard`, dashboardRouter);
 
 
 // 6. Handle Route Not Found Errors

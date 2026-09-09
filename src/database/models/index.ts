@@ -25,6 +25,7 @@ import { CreditAccount } from './credit-account.model';
 import { Customer } from './customer.model';
 import { Discount } from './discount.model';
 import { TaxCategory } from './tax-category.model';
+import { TaxClass } from './tax-class.model';
 import { ContactSubmission } from './contact-submission.model';
 import { HomepageBanner } from './homepage-banner.model';
 import { PriceLevel } from './price-level.model';
@@ -35,6 +36,9 @@ import { PaymentTransaction } from './payment-transaction.model';
 import { InventoryReservation } from './inventory-reservation.model';
 import { Register } from './register.model';
 import { Employee } from './employee.model';
+import { ProductSalesStats } from './product-sales-stats.model';
+import { POSSale } from './pos-sale.model';
+import { POSSaleLine } from './pos-sale-line.model';
 
 export const setupAssociations = () => {
   // Auth Associations
@@ -146,6 +150,41 @@ export const setupAssociations = () => {
   Employee.belongsTo(Shop, { foreignKey: 'limit_to_shop_id', as: 'limitShop' });
   Employee.belongsTo(Shop, { foreignKey: 'last_shop_id', as: 'lastShop' });
 
+  Product.belongsTo(TaxClass, {
+    foreignKey: 'tax_class_id',
+    targetKey: 'lightspeed_tax_class_id',
+    as: 'taxClass',
+    constraints: false,
+  });
+  TaxClass.hasMany(Product, {
+    foreignKey: 'tax_class_id',
+    sourceKey: 'lightspeed_tax_class_id',
+    as: 'products',
+    constraints: false,
+  });
+
+  Product.hasOne(ProductSalesStats, { foreignKey: 'product_id', as: 'salesStats' });
+  ProductSalesStats.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
+
+  // POS Sale Associations
+  POSSale.hasMany(POSSaleLine, { foreignKey: 'sale_id', as: 'lines' });
+  POSSaleLine.belongsTo(POSSale, { foreignKey: 'sale_id', as: 'sale' });
+
+  POSSaleLine.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
+  Product.hasMany(POSSaleLine, { foreignKey: 'product_id', as: 'posSaleLines' });
+
+  POSSale.belongsTo(Shop, { foreignKey: 'shop_id', as: 'shop' });
+  Shop.hasMany(POSSale, { foreignKey: 'shop_id', as: 'posSales' });
+
+  POSSale.belongsTo(Customer, { foreignKey: 'customer_id', as: 'customer' });
+  Customer.hasMany(POSSale, { foreignKey: 'customer_id', as: 'posSales' });
+
+  POSSale.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
+  Employee.hasMany(POSSale, { foreignKey: 'employee_id', as: 'posSales' });
+
+  POSSale.belongsTo(Register, { foreignKey: 'register_id', as: 'register' });
+  Register.hasMany(POSSale, { foreignKey: 'register_id', as: 'posSales' });
+
   logger.info('Model associations have been set up.');
 };
 
@@ -178,6 +217,7 @@ export {
   Customer,
   Discount,
   TaxCategory,
+  TaxClass,
   ContactSubmission,
   HomepageBanner,
   PriceLevel,
@@ -186,4 +226,7 @@ export {
   OrderItem,
   PaymentTransaction,
   InventoryReservation,
+  ProductSalesStats,
+  POSSale,
+  POSSaleLine,
 };

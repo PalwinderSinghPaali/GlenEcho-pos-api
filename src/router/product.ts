@@ -4,6 +4,7 @@ import {
   getProducts,
   getProduct,
   getProductsStock,
+  getLandingPageSections,
   createProduct,
   updateProduct,
   deleteProduct,
@@ -53,7 +54,10 @@ const handleBulkImportUpload = (req: any, res: any, next: any) => {
 // 1. Retrieve all products (flat, paginated, searchable, filterable)
 router.get('/', getProducts);
 
-// 2. Advanced search with relevance scoring, filters and facets (Algolia/Elastic style)
+// 2. Retrieve bundled products for landing page sections (Recently Added, Top Selling, Trending, Popular)
+router.get('/landing-sections', getLandingPageSections);
+
+// 3. Advanced search with relevance scoring, filters and facets (Algolia/Elastic style)
 router.get('/search', searchProducts);
 
 // 3. Bulk import products via CSV
