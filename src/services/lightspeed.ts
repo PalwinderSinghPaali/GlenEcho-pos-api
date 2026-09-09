@@ -26,9 +26,13 @@ import {
   CreditAccount,
   Discount,
   TaxCategory,
+  TaxClass,
   ItemAttributeSet,
   PriceLevel,
   CurrencyRate,
+  ProductSalesStats,
+  POSSale,
+  POSSaleLine,
 } from '@/database/models';
 
 export interface LightspeedItemPrice {
@@ -47,6 +51,8 @@ export interface LightspeedItemShop {
 
 export interface LightspeedItem {
   itemID: string;
+  createTime?: string;
+  timeStamp?: string;
   systemSku?: string;
   customSku?: string;
   upc?: string;
@@ -1840,6 +1846,7 @@ export class LightspeedService {
 
         const noteText = item.Note ? item.Note.note : item.note || null;
         const displayNote = item.Note ? item.Note.isPublic === 'true' : item.displayNote === 'true';
+        const lightspeedCreateTime = item.createTime ? new Date(item.createTime) : null;
 
         // Hash values for change detection
         const payloadForHash = {
@@ -1871,6 +1878,7 @@ export class LightspeedService {
           archived: item.archived === 'true',
           tax_class_id: taxClassId,
           tax_class_name: taxClassName,
+          lightspeed_create_time: lightspeedCreateTime ? lightspeedCreateTime.toISOString() : null,
           shops: shopsList.map((s) => ({
             shopID: s.shopID,
             qoh: s.qoh,
@@ -1931,6 +1939,7 @@ export class LightspeedService {
             archived: item.archived === 'true',
             tax_class_id: taxClassId,
             tax_class_name: taxClassName,
+            lightspeed_create_time: lightspeedCreateTime,
           },
           { transaction }
         );
@@ -3775,6 +3784,432 @@ export class LightspeedService {
       await transaction.rollback();
       throw error;
     }
+  }
+
+  /**
+   * syncTaxClassesPage - updates tax classes in local DB
+   */
+  public static async syncTaxClassesPage(taxClasses: any[]): Promise<void> {
+    const transaction = await sequelize.transaction();
+    try {
+      for (const tc of taxClasses) {
+        const [localTaxClass] = await TaxClass.upsert(
+          {
+            lightspeed_tax_class_id: tc.taxClassID.toString(),
+            name: tc.name,
+          },
+          { transaction }
+        );
+
+        await LightspeedEntityMap.upsert(
+          {
+            entity_type: 'tax_class',
+            lightspeed_id: tc.taxClassID.toString(),
+            local_id: localTaxClass.id,
+            hash: this.calculateHash({ name: tc.name }),
+          },
+          { transaction }
+        );
+      }
+      await transaction.commit();
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    }
+  }
+
+  /**
+   * syncTaxClasses - fetches all tax classes directly from Lightspeed and syncs them into local DB
+   */
+  public static async syncTaxClasses(): Promise<TaxClass[]> {
+    let nextUrl: string | null = null;
+    const allTaxClasses: any[] = [];
+    do {
+      const { data, next } = await this.fetchResource(nextUrl || 'TaxClass.json', undefined, 100);
+      nextUrl = next;
+      if (data && data.length > 0) {
+        await this.syncTaxClassesPage(data);
+        allTaxClasses.push(...data);
+      }
+    } while (nextUrl);
+
+    return TaxClass.findAll({ order: [['id', 'ASC']] });
+  }
+
+  /**
+   * syncSalesStats - Aggregates sales velocity metrics from Lightspeed completed sales
+   * into local `product_sales_stats` table for landing page ranking (Top Selling, Trending).
+   *
+   * @param options.days Number of days to look back for recent calculations (defaults to 30)
+   * @param options.backfill If true, looks back further (e.g. 365 days) to populate all-time baseline
+   */
+  public static async syncSalesStats(options: { days?: number; backfill?: boolean } = {}): Promise<{
+    salesProcessed: number;
+    productsUpdated: number;
+    durationMs: number;
+  }> {
+    const startTime = Date.now();
+    const days = options.backfill ? 365 : options.days || 30;
+    const sinceDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    const now = Date.now();
+    const t7d = now - 7 * 24 * 60 * 60 * 1000;
+    const t14d = now - 14 * 24 * 60 * 60 * 1000;
+    const t30d = now - 30 * 24 * 60 * 60 * 1000;
+
+    logger.info(
+      `Starting Lightspeed Sales Velocity Aggregation (lookback: ${days} days, since: ${sinceDate.toISOString()})...`
+    );
+
+    interface AggregatedItemStats {
+      units_7d: number;
+      units_prior_7d: number;
+      units_30d: number;
+      units_all_time: number;
+      revenue_30d: number;
+    }
+
+    const statsMap = new Map<string, AggregatedItemStats>();
+    let salesCount = 0;
+    let nextUrl: string | null = null;
+
+    try {
+      do {
+        const { data: sales, next } = await this.fetchResource(
+          nextUrl || 'Sale.json',
+          nextUrl ? undefined : sinceDate,
+          100,
+          nextUrl ? '' : 'load_relations=["SaleLines"]&completed=true&voided=false'
+        );
+
+        nextUrl = next;
+
+        for (const sale of sales) {
+          if (sale.completed !== 'true' || sale.voided === 'true') continue;
+          salesCount++;
+
+          const saleDate = new Date(sale.timeStamp || sale.createTime).getTime();
+          const saleLines =
+            sale.SaleLines && sale.SaleLines.SaleLine
+              ? this.extractList<any>(sale.SaleLines, 'SaleLine')
+              : [];
+
+          for (const line of saleLines) {
+            const itemID = line.itemID ? line.itemID.toString() : null;
+            if (!itemID || itemID === '0') continue; // Skip non-inventory/custom fee lines
+
+            const qty = parseFloat(line.unitQuantity || '0');
+            const subtotal = parseFloat(line.calcSubtotal || line.unitPrice || '0');
+
+            let entry = statsMap.get(itemID);
+            if (!entry) {
+              entry = {
+                units_7d: 0,
+                units_prior_7d: 0,
+                units_30d: 0,
+                units_all_time: 0,
+                revenue_30d: 0,
+              };
+              statsMap.set(itemID, entry);
+            }
+
+            // All-time accumulator
+            entry.units_all_time += qty;
+
+            // 30-day window
+            if (saleDate >= t30d) {
+              entry.units_30d += qty;
+              entry.revenue_30d += subtotal;
+            }
+
+            // 7-day window (Trending current)
+            if (saleDate >= t7d) {
+              entry.units_7d += qty;
+            } else if (saleDate >= t14d && saleDate < t7d) {
+              // Prior 7-day window (Trending momentum comparison)
+              entry.units_prior_7d += qty;
+            }
+          }
+        }
+      } while (nextUrl);
+
+      logger.info(
+        `Parsed ${salesCount} completed sales. Mapping ${statsMap.size} distinct items to local products...`
+      );
+
+      // Resolve local product IDs in chunks
+      const itemIds = Array.from(statsMap.keys());
+      const chunkSize = 500;
+      let productsUpdated = 0;
+      const jobTimestamp = new Date();
+
+      for (let i = 0; i < itemIds.length; i += chunkSize) {
+        const chunk = itemIds.slice(i, i + chunkSize);
+        const products = await Product.findAll({
+          where: { lightspeed_item_id: { [Op.in]: chunk } },
+          attributes: ['id', 'lightspeed_item_id'],
+        });
+
+        const productMap = new Map<string, number>();
+        products.forEach((p) => productMap.set(p.lightspeed_item_id, p.id));
+
+        for (const itemID of chunk) {
+          const localProductId = productMap.get(itemID);
+          if (!localProductId) continue;
+
+          const stats = statsMap.get(itemID)!;
+          await ProductSalesStats.upsert({
+            product_id: localProductId,
+            units_sold_7d: Math.max(0, Math.round(stats.units_7d)),
+            units_sold_prior_7d: Math.max(0, Math.round(stats.units_prior_7d)),
+            units_sold_30d: Math.max(0, Math.round(stats.units_30d)),
+            units_sold_all_time: Math.max(0, Math.round(stats.units_all_time)),
+            revenue_30d: Math.max(0, parseFloat(stats.revenue_30d.toFixed(2))),
+            last_computed_at: jobTimestamp,
+          });
+          productsUpdated++;
+        }
+      }
+
+      // If this was a standard 30-day run, decay older active records that had 0 sales in the last 30 days
+      if (!options.backfill) {
+        await ProductSalesStats.update(
+          {
+            units_sold_7d: 0,
+            units_sold_prior_7d: 0,
+            units_sold_30d: 0,
+            revenue_30d: 0,
+            last_computed_at: jobTimestamp,
+          },
+          {
+            where: {
+              last_computed_at: { [Op.lt]: jobTimestamp },
+            },
+          }
+        );
+      }
+
+      const durationMs = Date.now() - startTime;
+      logger.info(
+        `Sales velocity aggregation complete in ${durationMs}ms. Updated ${productsUpdated} products across ${salesCount} sales.`
+      );
+
+      return {
+        salesProcessed: salesCount,
+        productsUpdated,
+        durationMs,
+      };
+    } catch (err: any) {
+      logger.error('Error during sales velocity aggregation:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * syncPOSSalesPage - Upserts a page of sales and nested sale lines from Lightspeed
+   * into the local `pos_sales` and `pos_sale_lines` tables.
+   */
+  public static async syncPOSSalesPage(salesData: any[]): Promise<number> {
+    const transaction = await sequelize.transaction();
+    try {
+      let processedCount = 0;
+
+      const shopMap = new Map<string, number>();
+      const registerMap = new Map<string, number>();
+      const employeeMap = new Map<string, number>();
+      const customerMap = new Map<string, number>();
+
+      for (const sale of salesData) {
+        const saleId = (sale.saleID || sale.id || '').toString();
+        if (!saleId) continue;
+
+        // Resolve shop
+        let localShopId: number | null = null;
+        if (sale.shopID && sale.shopID !== '0') {
+          const shopIdStr = sale.shopID.toString();
+          if (shopMap.has(shopIdStr)) {
+            localShopId = shopMap.get(shopIdStr)!;
+          } else {
+            const sm = await LightspeedEntityMap.findOne({
+              where: { entity_type: 'shop', lightspeed_id: shopIdStr },
+              transaction,
+            });
+            localShopId = sm ? sm.local_id : null;
+            if (localShopId) shopMap.set(shopIdStr, localShopId);
+          }
+        }
+
+        // Resolve register
+        let localRegisterId: number | null = null;
+        if (sale.registerID && sale.registerID !== '0') {
+          const regIdStr = sale.registerID.toString();
+          if (registerMap.has(regIdStr)) {
+            localRegisterId = registerMap.get(regIdStr)!;
+          } else {
+            const rm = await LightspeedEntityMap.findOne({
+              where: { entity_type: 'register', lightspeed_id: regIdStr },
+              transaction,
+            });
+            localRegisterId = rm ? rm.local_id : null;
+            if (localRegisterId) registerMap.set(regIdStr, localRegisterId);
+          }
+        }
+
+        // Resolve employee
+        let localEmployeeId: number | null = null;
+        if (sale.employeeID && sale.employeeID !== '0') {
+          const empIdStr = sale.employeeID.toString();
+          if (employeeMap.has(empIdStr)) {
+            localEmployeeId = employeeMap.get(empIdStr)!;
+          } else {
+            const em = await LightspeedEntityMap.findOne({
+              where: { entity_type: 'employee', lightspeed_id: empIdStr },
+              transaction,
+            });
+            localEmployeeId = em ? em.local_id : null;
+            if (localEmployeeId) employeeMap.set(empIdStr, localEmployeeId);
+          }
+        }
+
+        // Resolve customer
+        let localCustomerId: number | null = null;
+        if (sale.customerID && sale.customerID !== '0') {
+          const custIdStr = sale.customerID.toString();
+          if (customerMap.has(custIdStr)) {
+            localCustomerId = customerMap.get(custIdStr)!;
+          } else {
+            const cm = await LightspeedEntityMap.findOne({
+              where: { entity_type: 'customer', lightspeed_id: custIdStr },
+              transaction,
+            });
+            localCustomerId = cm ? cm.local_id : null;
+            if (localCustomerId) customerMap.set(custIdStr, localCustomerId);
+          }
+        }
+
+        const saleTime = new Date(sale.timeStamp || sale.createTime || Date.now());
+        const lightspeedUpdatedAt = sale.timeStamp ? new Date(sale.timeStamp) : null;
+
+        const [posSale] = await POSSale.upsert(
+          {
+            lightspeed_sale_id: saleId,
+            shop_id: localShopId,
+            register_id: localRegisterId,
+            employee_id: localEmployeeId,
+            customer_id: localCustomerId,
+            completed: sale.completed === 'true' || sale.completed === true,
+            voided: sale.voided === 'true' || sale.voided === true,
+            total: parseFloat(sale.calcTotal || sale.total || '0'),
+            subtotal: parseFloat(sale.calcSubtotal || sale.subtotal || '0'),
+            tax_total: parseFloat(sale.calcTax1 || sale.taxTotal || '0'),
+            discount_total: parseFloat(sale.calcDiscount || sale.discountTotal || '0'),
+            sale_time: saleTime,
+            lightspeed_updated_at: lightspeedUpdatedAt,
+          },
+          { transaction }
+        );
+
+        // Parse line items
+        const rawLines =
+          sale.SaleLines && sale.SaleLines.SaleLine
+            ? this.extractList<any>(sale.SaleLines, 'SaleLine')
+            : [];
+
+        const lineItemIds = rawLines
+          .map((l: any) => (l.itemID ? l.itemID.toString() : null))
+          .filter((id: string | null) => id && id !== '0');
+
+        const productMap = new Map<string, number>();
+        if (lineItemIds.length > 0) {
+          const products = await Product.findAll({
+            where: { lightspeed_item_id: { [Op.in]: lineItemIds } },
+            attributes: ['id', 'lightspeed_item_id'],
+            transaction,
+          });
+          products.forEach((p) => productMap.set(p.lightspeed_item_id, p.id));
+        }
+
+        for (const line of rawLines) {
+          const lineId = (line.saleLineID || line.id || '').toString();
+          if (!lineId) continue;
+
+          const itemID = line.itemID ? line.itemID.toString() : null;
+          const localProductId = itemID && itemID !== '0' ? productMap.get(itemID) || null : null;
+
+          await POSSaleLine.upsert(
+            {
+              sale_id: posSale.id,
+              lightspeed_sale_line_id: lineId,
+              product_id: localProductId,
+              lightspeed_item_id: itemID,
+              unit_quantity: parseFloat(line.unitQuantity || '1'),
+              unit_price: parseFloat(line.unitPrice || '0'),
+              calc_subtotal: parseFloat(line.calcSubtotal || '0'),
+              calc_total: parseFloat(line.calcTotal || '0'),
+              tax: line.tax === 'true' || line.tax === true,
+            },
+            { transaction }
+          );
+        }
+
+        processedCount++;
+      }
+
+      await transaction.commit();
+      return processedCount;
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    }
+  }
+
+  /**
+   * refreshProductSalesStatsFromPOS - Runs a native PostgreSQL aggregation query
+   * that computes units_sold_7d, units_sold_prior_7d, units_sold_30d, units_sold_all_time,
+   * and revenue_30d from local `pos_sale_lines` and `pos_sales` tables directly into `product_sales_stats`.
+   * Execution time is typically < 100ms.
+   */
+  public static async refreshProductSalesStatsFromPOS(): Promise<void> {
+    const query = `
+      INSERT INTO product_sales_stats (
+        product_id,
+        units_sold_7d,
+        units_sold_prior_7d,
+        units_sold_30d,
+        units_sold_all_time,
+        revenue_30d,
+        last_computed_at,
+        created_at,
+        updated_at
+      )
+      SELECT
+        sl.product_id,
+        COALESCE(SUM(CASE WHEN s.sale_time >= NOW() - INTERVAL '7 days' THEN sl.unit_quantity ELSE 0 END), 0) AS units_sold_7d,
+        COALESCE(SUM(CASE WHEN s.sale_time >= NOW() - INTERVAL '14 days' AND s.sale_time < NOW() - INTERVAL '7 days' THEN sl.unit_quantity ELSE 0 END), 0) AS units_sold_prior_7d,
+        COALESCE(SUM(CASE WHEN s.sale_time >= NOW() - INTERVAL '30 days' THEN sl.unit_quantity ELSE 0 END), 0) AS units_sold_30d,
+        COALESCE(SUM(sl.unit_quantity), 0) AS units_sold_all_time,
+        COALESCE(SUM(CASE WHEN s.sale_time >= NOW() - INTERVAL '30 days' THEN sl.calc_subtotal ELSE 0 END), 0) AS revenue_30d,
+        NOW(),
+        NOW(),
+        NOW()
+      FROM pos_sale_lines sl
+      JOIN pos_sales s ON s.id = sl.sale_id
+      WHERE s.completed = true
+        AND s.voided = false
+        AND sl.product_id IS NOT NULL
+      GROUP BY sl.product_id
+      ON CONFLICT (product_id) DO UPDATE SET
+        units_sold_7d = EXCLUDED.units_sold_7d,
+        units_sold_prior_7d = EXCLUDED.units_sold_prior_7d,
+        units_sold_30d = EXCLUDED.units_sold_30d,
+        units_sold_all_time = EXCLUDED.units_sold_all_time,
+        revenue_30d = EXCLUDED.revenue_30d,
+        last_computed_at = NOW(),
+        updated_at = NOW();
+    `;
+
+    await sequelize.query(query);
+    logger.info('Refreshed product_sales_stats table from local POS sales data.');
   }
 }
 

@@ -217,6 +217,9 @@ export class LightspeedQueue {
       case 'SYNC_TAX_CATEGORY_PAGE':
         await LightspeedService.syncTaxCategoriesPage(job.payload.taxCategories);
         break;
+      case 'SYNC_TAX_CLASS_PAGE':
+        await LightspeedService.syncTaxClassesPage(job.payload.taxClasses);
+        break;
 
       // Image sync
       case 'SYNC_IMAGE':
@@ -254,6 +257,15 @@ export class LightspeedQueue {
         break;
       case 'CLEANUP_ABANDONED_CHECKOUTS':
         await this.executeCleanupAbandonedCheckouts();
+        break;
+      case 'AGGREGATE_SALES_VELOCITY':
+        await this.executeAggregateSalesVelocity(job.payload);
+        break;
+      case 'POLL_POS_SALES':
+        await this.executePollPOSSales(job.payload);
+        break;
+      case 'SYNC_POS_SALE_PAGE':
+        await LightspeedService.syncPOSSalesPage(job.payload.sales);
         break;
 
       default:
@@ -469,6 +481,14 @@ export class LightspeedQueue {
         useTimestamp: true,
         pluralKey: 'taxCategories',
         queryParams: 'archived=all',
+      },
+      {
+        type: 'tax_class',
+        endpoint: 'TaxClass.json',
+        jobType: 'SYNC_TAX_CLASS_PAGE',
+        useTimestamp: true,
+        pluralKey: 'taxClasses',
+        queryParams: '',
       },
       {
         type: 'customer_type',
@@ -1096,6 +1116,97 @@ export class LightspeedQueue {
       } catch (err) {
         logger.error(`Error cleaning up abandoned order ${order.id}:`, err);
       }
+    }
+  }
+
+  /**
+   * executeAggregateSalesVelocity - runs sales velocity aggregation from Lightspeed completed sales
+   */
+  public static async executeAggregateSalesVelocity(payload?: any): Promise<void> {
+    logger.info('Executing scheduled Sales Velocity Aggregation...');
+    const backfill = payload?.backfill === true;
+    const days = payload?.days ? Number(payload.days) : undefined;
+    await LightspeedService.syncSalesStats({ backfill, days });
+  }
+
+  /**
+   * executePollPOSSales - Incremental poll for in-store POS sales.
+   * Uses cursor from LightspeedSyncState (entity_type: 'pos_sale'),
+   * pulls newly modified sales since cursor, persists to pos_sales/pos_sale_lines,
+   * and triggers refreshProductSalesStatsFromPOS().
+   */
+  public static async executePollPOSSales(options?: any): Promise<void> {
+    logger.info('Starting Incremental POS Sales Poll...');
+    const [state] = await LightspeedSyncState.findOrCreate({
+      where: { entity_type: 'pos_sale' },
+      defaults: {
+        entity_type: 'pos_sale',
+        last_synced_at: null,
+        last_cursor_ts: null,
+        status: 'idle',
+        last_error: null,
+        records_processed: 0,
+      },
+    });
+
+    state.status = 'running';
+    await state.save();
+
+    try {
+      let since: Date;
+      if (options?.backfillDays) {
+        since = new Date(Date.now() - Number(options.backfillDays) * 24 * 60 * 60 * 1000);
+      } else if (state.last_cursor_ts) {
+        since = new Date(state.last_cursor_ts);
+      } else {
+        // Default first run: past 365 days of sales as initial baseline
+        since = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+      }
+
+      let nextUrl: string | null = null;
+      let totalFetched = 0;
+      let maxCursorTime = since.getTime();
+
+      do {
+        const { data: sales, next } = await LightspeedService.fetchResource(
+          nextUrl || 'Sale.json',
+          nextUrl ? undefined : since,
+          100,
+          nextUrl ? '' : 'load_relations=["SaleLines"]'
+        );
+
+        nextUrl = next;
+
+        if (sales.length > 0) {
+          await LightspeedService.syncPOSSalesPage(sales);
+
+          for (const s of sales) {
+            if (s.timeStamp) {
+              const ts = new Date(s.timeStamp).getTime();
+              if (ts > maxCursorTime) maxCursorTime = ts;
+            }
+          }
+          totalFetched += sales.length;
+        }
+      } while (nextUrl);
+
+      state.last_cursor_ts = new Date(maxCursorTime).toISOString();
+      state.last_synced_at = new Date();
+      state.status = 'idle';
+      state.records_processed = totalFetched;
+      state.last_error = null;
+      await state.save();
+
+      // Recalculate sales velocity metrics instantly via local SQL
+      await LightspeedService.refreshProductSalesStatsFromPOS();
+
+      logger.info(`POS Sales Poll complete. Synced ${totalFetched} sales and refreshed sales stats.`);
+    } catch (err: any) {
+      state.status = 'error';
+      state.last_error = err.message;
+      await state.save();
+      logger.error('Error during POS Sales Poll:', err);
+      throw err;
     }
   }
 }
