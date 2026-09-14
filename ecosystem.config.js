@@ -9,6 +9,8 @@ module.exports = {
       max_memory_restart: '1G', // Restarts if memory usage exceeds 1GB (prevents memory leaks)
       env_production: {
         NODE_ENV: 'production',
+        PORT: 5000,
+        APP_MODE: 'api',
       },
       error_file: './logs/pm2-err.log',
       out_file: './logs/pm2-out.log',
@@ -26,7 +28,7 @@ module.exports = {
       max_memory_restart: '1G',
       env_production: {
         NODE_ENV: 'production',
-        PORT: 3001,
+        APP_MODE: 'worker',
       },
       error_file: './logs/pm2-worker-err.log',
       out_file: './logs/pm2-worker-out.log',
