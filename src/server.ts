@@ -30,7 +30,8 @@ const connectToDb = async (): Promise<void> => {
 };
 
 async function bootstrap() {
-  logger.info('Initializing application bootstrap...');
+  const appMode = process.env.APP_MODE || 'all';
+  logger.info(`Initializing application bootstrap in [${appMode}] mode...`);
 
   // 1. Verify Database Connection
   await connectToDb();
@@ -41,15 +42,20 @@ async function bootstrap() {
   //   process.exit(1);
   // }
 
-  // 3. Start background job workers
-  LightspeedQueue.startWorker();
+  // 3. Start background job workers (only in worker or all mode)
+  if (appMode === 'worker' || appMode === 'all') {
+    logger.info('Starting Lightspeed background queue worker...');
+    LightspeedQueue.startWorker();
+  }
 
-  // 4. Start Server Listener
-  const port = config.app.port;
-  server = app.listen(port, () => {
-    logger.info(`Server started in [${config.app.env}] mode on port: ${port}`);
-    logger.info(`App API URL: http://${config.app.host}:${port}${config.app.prefix}/${config.app.version}`);
-  });
+  // 4. Start Server Listener (only in api or all mode)
+  if (appMode === 'api' || appMode === 'all') {
+    const port = config.app.port;
+    server = app.listen(port, () => {
+      logger.info(`Server started in [${config.app.env}] mode on port: ${port}`);
+      logger.info(`App API URL: http://${config.app.host}:${port}${config.app.prefix}/${config.app.version}`);
+    });
+  }
 
   // 5. Handle Graceful Shutdown signals
   const shutdown = async (signal: string) => {
@@ -69,7 +75,9 @@ async function bootstrap() {
 
     try {
       // Stop workers
-      LightspeedQueue.stopWorker();
+      if (appMode === 'worker' || appMode === 'all') {
+        LightspeedQueue.stopWorker();
+      }
 
       // Disconnect Redis
       // logger.info('Disconnecting Redis...');

@@ -258,6 +258,7 @@ describe('Product Write Controllers', () => {
         expect.objectContaining({
           taxClassID: '1',
           description: 'Rose Bush',
+          Tags: [{ tag: 'Outdoor' }, { tag: 'Perennial' }],
         })
       );
       expect(ProductTag.bulkCreate).toHaveBeenCalledWith(
@@ -266,6 +267,43 @@ describe('Product Write Controllers', () => {
           { product_id: 20, tag_id: 102 },
         ],
         expect.any(Object)
+      );
+    });
+
+    it('should format a single tag as an object { tag: name } in Lightspeed payload on create', async () => {
+      mockRequest.body = {
+        description: 'Single Tag Bush',
+        price: 20.0,
+        tags: ['Indoor'],
+      };
+
+      (LightspeedService.isReadOnlyMode as jest.Mock).mockResolvedValue(false);
+      (LightspeedService.createProduct as jest.Mock).mockResolvedValue({
+        Item: { itemID: '406', systemSku: '210000000406', description: 'Single Tag Bush' },
+      });
+      (LightspeedService.extractList as jest.Mock).mockReturnValue([
+        { itemID: '406', systemSku: '210000000406', description: 'Single Tag Bush' },
+      ]);
+      (Tag.findOrCreate as jest.Mock).mockResolvedValueOnce([{ id: 103, name: 'Indoor' }]);
+      (LightspeedService.calculateHash as jest.Mock).mockReturnValue('mockhashsingle');
+
+      const mockCreated = {
+        id: 21,
+        lightspeed_item_id: '406',
+        description: 'Single Tag Bush',
+        price: 20.0,
+        qoh: 0,
+        toJSON: () => ({ id: 21, lightspeed_item_id: '406', description: 'Single Tag Bush' }),
+      };
+      (Product.create as jest.Mock).mockResolvedValue(mockCreated);
+
+      await createProduct(mockRequest as Request, mockResponse as Response);
+
+      expect(LightspeedService.createProduct).toHaveBeenCalledWith(
+        expect.objectContaining({
+          description: 'Single Tag Bush',
+          Tags: { tag: 'Indoor' },
+        })
       );
     });
 

@@ -28,6 +28,23 @@ import { LightspeedService } from '@/services/lightspeed';
 // ---------------------------------------------------------------------------
 
 /**
+ * Formats tags for Lightspeed POS Item payload:
+ * In Lightspeed Retail R-Series:
+ * - 1 tag: { tag: "VIP" }
+ * - >1 tags: [{ tag: "Landscape" }, { tag: "Commercial" }, { tag: "VIP" }]
+ * (Note: Sending { tag: ["tag1", "tag2"] } fails with 400 InvalidArgumentException: JSON structure is invalid).
+ */
+function formatLightspeedTags(tagList: string[]): any {
+  if (tagList.length === 1) {
+    return { tag: tagList[0] };
+  }
+  if (tagList.length > 1) {
+    return tagList.map((t) => ({ tag: t }));
+  }
+  return undefined;
+}
+
+/**
  * Formats a Product instance to include all sub-resources and map to camelCase structure
  * where appropriate to perfectly align with the POS integration responses.
  */
@@ -742,16 +759,16 @@ export const createProduct = async (req: Request, res: Response) => {
     if (resolvedTaxClassId !== '0') {
       lsPayload.taxClassID = resolvedTaxClassId;
     }
-    const resolvedCustomSku = custom_sku || req.body.customSku;
-    const resolvedManufacturerSku = manufacturer_sku || req.body.manufacturerSku;
-    const resolvedUpc = upc || req.body.Upc;
-    const resolvedEan = ean || req.body.Ean;
-    const resolvedSystemSkuInput = system_sku || req.body.systemSku;
+    const resolvedCustomSku = (custom_sku || req.body.customSku || '').toString().trim();
+    const resolvedManufacturerSku = (manufacturer_sku || req.body.manufacturerSku || '').toString().trim();
+    const resolvedUpc = (upc || req.body.Upc || '').toString().trim();
+    const resolvedEan = (ean || req.body.Ean || '').toString().trim();
+    const resolvedSystemSkuInput = (system_sku || req.body.systemSku || '').toString().trim();
 
-    if (resolvedCustomSku) lsPayload.customSku = String(resolvedCustomSku);
-    if (resolvedManufacturerSku) lsPayload.manufacturerSku = String(resolvedManufacturerSku);
-    if (resolvedUpc) lsPayload.upc = String(resolvedUpc);
-    if (resolvedEan) lsPayload.ean = String(resolvedEan);
+    if (resolvedCustomSku) lsPayload.customSku = resolvedCustomSku;
+    if (resolvedManufacturerSku) lsPayload.manufacturerSku = resolvedManufacturerSku;
+    if (resolvedUpc) lsPayload.upc = resolvedUpc;
+    if (resolvedEan) lsPayload.ean = resolvedEan;
 
     // Note and Display Note in Lightspeed payload
     if (resolvedNote) {
@@ -783,9 +800,7 @@ export const createProduct = async (req: Request, res: Response) => {
 
     // Tags in Lightspeed payload
     if (resolvedTagNames.length > 0) {
-      lsPayload.Tags = {
-        tag: resolvedTagNames.length === 1 ? resolvedTagNames[0] : resolvedTagNames,
-      };
+      lsPayload.Tags = formatLightspeedTags(resolvedTagNames);
     }
 
     // Resolve Vendors
@@ -1362,9 +1377,7 @@ export const updateProduct = async (req: Request, res: Response) => {
 
     // Tags in Lightspeed payload
     if (resolvedTagNames !== undefined && resolvedTagNames.length > 0) {
-      lsPayload.Tags = {
-        tag: resolvedTagNames.length === 1 ? resolvedTagNames[0] : resolvedTagNames,
-      };
+      lsPayload.Tags = formatLightspeedTags(resolvedTagNames);
     }
 
     // Resolve Vendors if provided
