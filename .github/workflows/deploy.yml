@@ -1,0 +1,120 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    name: 🧪 Test & Build (CI)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: ⬇️ Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js 24.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: 'npm'
+
+      - name: 📦 Install Dependencies
+        run: npm ci
+
+      - name: 🏗️ Verify TypeScript Build
+        run: npm run build
+
+      - name: 🧪 Run Test Suite
+        run: npm test
+        env:
+          NODE_ENV: test
+          PORT: 5000
+          JWT_ACCESS_SECRET: test_jwt_access_secret_32_characters_long_123
+          JWT_REFRESH_SECRET: test_jwt_refresh_secret_32_characters_long_123
+          DB_HOST: 127.0.0.1
+          DB_PORT: 5432
+          DB_USER: test
+          DB_PASSWORD: test
+          DB_NAME: test
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: 6379
+          LIGHTSPEED_CLIENT_ID: test_client_id
+          LIGHTSPEED_CLIENT_SECRET: test_client_secret
+          LIGHTSPEED_REFRESH_TOKEN: test_refresh_token
+          LIGHTSPEED_ACCOUNT_ID: test_account_id
+
+  deploy:
+    name: 🚀 Deploy to Production (CD)
+    needs: test-and-build
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🌐 Deploy via SSH to Production Server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          passphrase: ${{ secrets.SSH_PASSPHRASE }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script_stop: false
+          script: |
+            set -e
+
+            # 1. Load NVM and Node 24 for deploy user
+            export NVM_DIR="$HOME/.nvm"
+            if [ -s "$NVM_DIR/nvm.sh" ]; then
+              \. "$NVM_DIR/nvm.sh"
+            fi
+            export PATH=$PATH:$NVM_DIR/versions/node/$(ls $NVM_DIR/versions/node 2>/dev/null | tail -n 1)/bin:/usr/local/bin:/usr/bin
+
+            if command -v nvm >/dev/null 2>&1; then
+              nvm use 24 2>/dev/null || nvm use default 2>/dev/null || true
+            fi
+
+            echo "🔍 Environment Verification:"
+            echo "  - Node: $(node -v 2>/dev/null || echo 'NOT FOUND') [$(which node 2>/dev/null || echo 'N/A')]"
+            echo "  - npm:  $(npm -v 2>/dev/null || echo 'NOT FOUND') [$(which npm 2>/dev/null || echo 'N/A')]"
+            echo "  - PM2:  $(pm2 -v 2>/dev/null || echo 'NOT FOUND') [$(which pm2 2>/dev/null || echo 'N/A')]"
+            echo "  - User: $(whoami) (HOME=$HOME)"
+
+            # 2. Go to application directory
+            cd /var/www/glenecho/glenecho-backend
+            git config --global --add safe.directory /var/www/glenecho/glenecho-backend 2>/dev/null || true
+
+            # 3. Pull latest changes securely using GITHUB_TOKEN
+            echo "Pulling latest code from GitHub..."
+            git fetch https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git main:refs/remotes/origin/main
+            git reset --hard
+            git checkout -f -B main refs/remotes/origin/main
+            git reset --hard refs/remotes/origin/main
+
+            # 4. Install dependencies
+            echo "Installing dependencies..."
+            npm install
+
+            # 5. Database migrations (runs on every deployment)
+            echo "Running database migrations..."
+            npm run db:migrate
+
+            # 6. Compile TypeScript with tsc and tsc-alias
+            echo "Building application..."
+            npm run build
+
+            # 7. Zero-downtime PM2 reload
+            echo "Reloading PM2 apps..."
+            mkdir -p logs
+            pm2 startOrReload ecosystem.config.js --env production --update-env
+
+            # 8. Save PM2 process list
+            pm2 save
+
+            echo "✅ Deployment completed successfully!"
